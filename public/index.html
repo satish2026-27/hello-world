@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jewelry Parcel Management — UAT Environment</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+  <link rel="stylesheet" href="/css/custom.css" />
+</head>
+<body>
+
+<!-- ── Navbar ──────────────────────────────────────────────────────────────── -->
+<nav class="navbar navbar-dark bg-dark px-3">
+  <span class="navbar-brand fw-bold">
+    <i class="bi bi-gem me-2 text-warning"></i>Parcel ERP — UAT
+  </span>
+  <div class="d-flex gap-2">
+    <button class="btn btn-sm btn-outline-warning" onclick="showView('dashboard')"><i class="bi bi-speedometer2"></i> Dashboard</button>
+    <button class="btn btn-sm btn-outline-light"   onclick="showView('parcels')"><i class="bi bi-box-seam"></i> Parcels</button>
+    <button class="btn btn-sm btn-outline-success" onclick="showView('receive')"><i class="bi bi-plus-circle"></i> Receive</button>
+    <button class="btn btn-sm btn-outline-info"    onclick="showView('uat')"><i class="bi bi-clipboard-check"></i> UAT Scenarios</button>
+  </div>
+</nav>
+
+<!-- ── Toast container ─────────────────────────────────────────────────────── -->
+<div id="toastContainer" class="position-fixed bottom-0 end-0 p-3" style="z-index:9999"></div>
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     VIEWS
+═══════════════════════════════════════════════════════════════════════════════ -->
+<div class="container-fluid py-3">
+
+  <!-- ── Dashboard ──────────────────────────────────────────────────────────── -->
+  <div id="view-dashboard">
+    <h4 class="mb-3"><i class="bi bi-speedometer2 me-2 text-warning"></i>Dashboard</h4>
+    <div class="row g-3 mb-4" id="statCards"></div>
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-header fw-semibold">Inventory by Material</div>
+          <div class="card-body p-0">
+            <table class="table table-sm table-hover mb-0" id="matTable">
+              <thead class="table-dark"><tr><th>Material</th><th>Parcels</th><th>Pieces</th><th>Weight (ct)</th><th>Value (USD)</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-header fw-semibold">Recent Transactions</div>
+          <div class="card-body p-0">
+            <table class="table table-sm table-hover mb-0" id="recentTxTable">
+              <thead class="table-dark"><tr><th>Date</th><th>Parcel</th><th>Type</th><th>Δ Pcs</th><th>Δ Wt</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Parcel List ─────────────────────────────────────────────────────────── -->
+  <div id="view-parcels" class="d-none">
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+      <h4 class="mb-0"><i class="bi bi-box-seam me-2 text-primary"></i>Parcel Inventory</h4>
+      <input type="text" id="searchQ" class="form-control form-control-sm w-auto" placeholder="Search number / notes…" oninput="loadParcels()" />
+      <select id="filterLifecycle" class="form-select form-select-sm w-auto" onchange="loadParcels()">
+        <option value="">All stages</option>
+        <option>available</option><option>in_production</option><option>on_memo</option>
+        <option>quarantined</option><option>reserved</option><option>closed</option>
+      </select>
+      <select id="filterMaterial" class="form-select form-select-sm w-auto" onchange="loadParcels()">
+        <option value="">All materials</option>
+      </select>
+      <button class="btn btn-sm btn-success ms-auto" onclick="showView('receive')"><i class="bi bi-plus-circle me-1"></i>Receive New</button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle" id="parcelTable">
+        <thead class="table-dark">
+          <tr>
+            <th>Parcel #</th><th>Material</th><th>Origin</th><th>Shape / Size</th>
+            <th>Color / Clarity</th><th>Pcs</th><th>Wt (ct)</th><th>Available</th>
+            <th>Stage</th><th>Location</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="parcelBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Parcel Detail ──────────────────────────────────────────────────────── -->
+  <div id="view-detail" class="d-none">
+    <button class="btn btn-sm btn-outline-secondary mb-3" onclick="showView('parcels')">
+      <i class="bi bi-arrow-left me-1"></i>Back to list
+    </button>
+    <div id="detailContent"></div>
+  </div>
+
+  <!-- ── Receive Form ────────────────────────────────────────────────────────── -->
+  <div id="view-receive" class="d-none">
+    <h4 class="mb-3"><i class="bi bi-plus-circle me-2 text-success"></i>Receive New Parcel</h4>
+    <div class="card" style="max-width:720px">
+      <div class="card-body">
+        <form id="receiveForm" onsubmit="submitReceive(event)">
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label">Parcel Number *</label><input class="form-control" name="parcel_number" placeholder="e.g. DP-000299" /></div>
+            <div class="col-md-6"><label class="form-label">Vendor Parcel #</label><input class="form-control" name="vendor_parcel_number" /></div>
+            <div class="col-md-6"><label class="form-label">PO Number</label><input class="form-control" name="po_number" /></div>
+            <div class="col-md-6"><label class="form-label">Receipt Ref</label><input class="form-control" name="receipt_reference" /></div>
+
+            <div class="col-md-6">
+              <label class="form-label">Material *</label>
+              <select class="form-select" name="material" required id="materialSelect">
+                <option value="">— select —</option>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Origin *</label>
+              <select class="form-select" name="material_origin" required>
+                <option value="natural">Natural</option>
+                <option value="lab_grown">Lab-Grown</option>
+                <option value="simulant">Simulant</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </div>
+
+            <div class="col-md-4"><label class="form-label">Condition</label>
+              <select class="form-select" name="condition">
+                <option>polished</option><option>rough</option><option>preformed</option><option>cabochon</option>
+              </select>
+            </div>
+            <div class="col-md-4"><label class="form-label">Shape</label><input class="form-control" name="shape" placeholder="Round Brilliant" /></div>
+            <div class="col-md-2"><label class="form-label">Size Min (mm)</label><input class="form-control" name="size_min_mm" type="number" step="0.1" /></div>
+            <div class="col-md-2"><label class="form-label">Size Max (mm)</label><input class="form-control" name="size_max_mm" type="number" step="0.1" /></div>
+
+            <div class="col-md-3"><label class="form-label">Color</label><input class="form-control" name="color" placeholder="G" /></div>
+            <div class="col-md-3"><label class="form-label">Color Range Max</label><input class="form-control" name="color_range_max" placeholder="H" /></div>
+            <div class="col-md-3"><label class="form-label">Clarity</label><input class="form-control" name="clarity" placeholder="SI1" /></div>
+            <div class="col-md-3"><label class="form-label">Clarity Max</label><input class="form-control" name="clarity_range_max" placeholder="SI2" /></div>
+
+            <div class="col-md-4"><label class="form-label">Treatment</label><input class="form-control" name="treatment" value="none" /></div>
+            <div class="col-md-4"><label class="form-label">Origin Country</label><input class="form-control" name="origin_country" /></div>
+            <div class="col-md-4">
+              <label class="form-label">Screening Status</label>
+              <select class="form-select" name="screening_status">
+                <option value="pending">Pending</option><option value="screened">Screened</option>
+                <option value="certified">Certified</option><option value="not_required">Not Required</option>
+              </select>
+            </div>
+
+            <div class="col-md-3"><label class="form-label">Pieces *</label><input class="form-control" name="original_pieces" type="number" min="0" required /></div>
+            <div class="col-md-3"><label class="form-label">Weight (ct)</label><input class="form-control" name="original_weight_ct" type="number" step="0.0001" /></div>
+            <div class="col-md-3"><label class="form-label">Purchase Rate</label><input class="form-control" name="purchase_rate" type="number" step="0.01" /></div>
+            <div class="col-md-3">
+              <label class="form-label">Pricing Unit</label>
+              <select class="form-select" name="pricing_unit">
+                <option value="per_carat">Per Carat</option>
+                <option value="per_piece">Per Piece</option>
+                <option value="per_gram">Per Gram</option>
+                <option value="per_parcel">Per Parcel</option>
+              </select>
+            </div>
+
+            <div class="col-md-4"><label class="form-label">Site</label><input class="form-control" name="site" placeholder="Main Office" /></div>
+            <div class="col-md-4"><label class="form-label">Vault</label><input class="form-control" name="vault" placeholder="Vault A" /></div>
+            <div class="col-md-4"><label class="form-label">Bin/Tray</label><input class="form-control" name="bin_location" /></div>
+            <div class="col-md-6"><label class="form-label">Custodian</label><input class="form-control" name="custodian" /></div>
+            <div class="col-md-6"><label class="form-label">Owner</label><input class="form-control" name="owner" value="Company" /></div>
+
+            <div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" name="notes" rows="2"></textarea></div>
+          </div>
+          <div class="mt-3 d-flex gap-2">
+            <button type="submit" class="btn btn-success"><i class="bi bi-check2 me-1"></i>Receive Parcel</button>
+            <button type="button" class="btn btn-outline-secondary" onclick="showView('parcels')">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── UAT Scenarios ──────────────────────────────────────────────────────── -->
+  <div id="view-uat" class="d-none">
+    <h4 class="mb-1"><i class="bi bi-clipboard-check me-2 text-info"></i>UAT Test Scenarios</h4>
+    <p class="text-muted small mb-3">Use these guided test cases to validate the parcel management system. Check each scenario manually against the expected result.</p>
+    <div id="uatList"></div>
+  </div>
+
+</div><!-- /container -->
+
+<!-- ── Modals ─────────────────────────────────────────────────────────────────── -->
+
+<!-- Split Modal -->
+<div class="modal fade" id="splitModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-scissors me-2"></i>Split Parcel</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="text-muted small" id="splitSourceInfo"></p>
+        <div id="splitRows"></div>
+        <button class="btn btn-sm btn-outline-secondary mt-2" onclick="addSplitRow()"><i class="bi bi-plus me-1"></i>Add Split</button>
+        <div class="mt-3">
+          <label class="form-label small">Allocation method</label>
+          <select class="form-select form-select-sm w-auto" id="splitAllocMethod">
+            <option value="proportional_weight">Proportional by Weight</option>
+            <option value="proportional_pieces">Proportional by Pieces</option>
+            <option value="manual">Manual</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="doSplit()"><i class="bi bi-scissors me-1"></i>Execute Split</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Merge Modal -->
+<div class="modal fade" id="mergeModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-union me-2"></i>Merge Parcels</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted">Select two or more compatible parcels to merge. They must share the same material origin.</p>
+        <div id="mergeCheckboxes" class="mb-3" style="max-height:260px;overflow-y:auto"></div>
+        <label class="form-label">New Parcel Number</label>
+        <input class="form-control" id="mergeNewNum" placeholder="e.g. DP-MERGE-001" />
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="doMerge()"><i class="bi bi-union me-1"></i>Execute Merge</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Transfer Modal -->
+<div class="modal fade" id="transferModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-arrow-left-right me-2"></i>Transfer Parcel</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-2"><label class="form-label">Site</label><input class="form-control" id="tfSite" /></div>
+        <div class="mb-2"><label class="form-label">Vault</label><input class="form-control" id="tfVault" /></div>
+        <div class="mb-2"><label class="form-label">Bin / Tray</label><input class="form-control" id="tfBin" /></div>
+        <div class="mb-2"><label class="form-label">New Custodian</label><input class="form-control" id="tfCustodian" /></div>
+        <div class="mb-2"><label class="form-label">Reason</label><input class="form-control" id="tfReason" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="tfNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="doTransfer()">Transfer</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Issue Modal -->
+<div class="modal fade" id="issueModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-tools me-2"></i>Issue to Manufacturing</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="issueInfo"></p>
+        <div class="mb-2"><label class="form-label">Pieces *</label><input class="form-control" id="issPieces" type="number" min="1" /></div>
+        <div class="mb-2"><label class="form-label">Weight (ct) *</label><input class="form-control" id="issWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Work Order #</label><input class="form-control" id="issWO" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="issNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-warning" onclick="doIssue()"><i class="bi bi-tools me-1"></i>Issue</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Return Modal -->
+<div class="modal fade" id="returnModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-arrow-return-left me-2"></i>Manufacturing Return</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="returnInfo"></p>
+        <div class="mb-2"><label class="form-label">Returned Pieces</label><input class="form-control" id="retPieces" type="number" min="0" /></div>
+        <div class="mb-2"><label class="form-label">Weight Returned (ct)</label><input class="form-control" id="retWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Broken Pieces</label><input class="form-control" id="retBroken" type="number" min="0" value="0" /></div>
+        <div class="mb-2"><label class="form-label">Lost Pieces</label><input class="form-control" id="retLost" type="number" min="0" value="0" /></div>
+        <div class="mb-2"><label class="form-label">Work Order #</label><input class="form-control" id="retWO" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="retNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-success" onclick="doReturn()"><i class="bi bi-arrow-return-left me-1"></i>Record Return</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Memo Modal -->
+<div class="modal fade" id="memoModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-envelope me-2"></i>Issue on Memo</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="memoInfo"></p>
+        <div class="mb-2"><label class="form-label">Pieces *</label><input class="form-control" id="memoPieces" type="number" min="1" /></div>
+        <div class="mb-2"><label class="form-label">Weight (ct)</label><input class="form-control" id="memoWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Customer / Party</label><input class="form-control" id="memoCustomer" /></div>
+        <div class="mb-2"><label class="form-label">Memo Reference</label><input class="form-control" id="memoRef" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="memoNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-info" onclick="doMemo()"><i class="bi bi-envelope me-1"></i>Issue Memo</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Adjust Modal -->
+<div class="modal fade" id="adjustModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-calculator me-2"></i>Count / Weight Adjustment</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="adjustInfo"></p>
+        <div class="mb-2"><label class="form-label">New Piece Count</label><input class="form-control" id="adjPieces" type="number" min="0" /></div>
+        <div class="mb-2"><label class="form-label">New Weight (ct)</label><input class="form-control" id="adjWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Reason</label><input class="form-control" id="adjReason" /></div>
+        <div class="mb-2"><label class="form-label">Approved By</label><input class="form-control" id="adjApprover" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="adjNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="doAdjust()"><i class="bi bi-calculator me-1"></i>Record Adjustment</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

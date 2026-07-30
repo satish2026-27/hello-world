@@ -1,0 +1,69 @@
+/* ── Brand colours ────────────────────────────────────────────────────────── */
+:root {
+  --gem-gold   : #c8961e;
+  --gem-navy   : #1a2440;
+  --gem-teal   : #0d6e6e;
+  --gem-rose   : #8b2e4a;
+}
+
+body { background: #f4f6f9; font-size: 0.875rem; }
+
+/* ── Navbar ──────────────────────────────────────────────────────────────── */
+.navbar { background: var(--gem-navy) !important; }
+.navbar-brand { font-size: 1rem; letter-spacing: .03em; }
+
+/* ── Cards ───────────────────────────────────────────────────────────────── */
+.card { border: none; box-shadow: 0 1px 4px rgba(0,0,0,.10); border-radius: .6rem; }
+.card-header { background: #fff; border-bottom: 1px solid #e9ecef; font-size: .8rem; padding: .6rem 1rem; }
+
+/* ── Stat cards ─────────────────────────────────────────────────────────── */
+.stat-card { border-left: 4px solid var(--gem-gold); }
+.stat-card .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--gem-navy); }
+.stat-card .stat-label { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #6c757d; }
+
+/* ── Badges for stages ───────────────────────────────────────────────────── */
+.badge-available   { background-color: #198754; color:#fff; }
+.badge-in_production { background-color: #0d6efd; color:#fff; }
+.badge-on_memo     { background-color: #fd7e14; color:#fff; }
+.badge-quarantined { background-color: #dc3545; color:#fff; }
+.badge-reserved    { background-color: #6f42c1; color:#fff; }
+.badge-closed      { background-color: #6c757d; color:#fff; }
+.badge-merged      { background-color: #adb5bd; color:#fff; }
+
+/* ── Material origin dots ────────────────────────────────────────────────── */
+.origin-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
+.dot-natural    { background:#198754; }
+.dot-lab_grown  { background:#0d6efd; }
+.dot-simulant   { background:#6c757d; }
+.dot-unknown    { background:#dc3545; }
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+.table th { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.table td { vertical-align: middle; }
+
+/* ── Transaction type chips ─────────────────────────────────────────────── */
+.txn-chip { display:inline-block; padding:1px 7px; border-radius:10px; font-size:.7rem; font-weight:600; }
+.txn-receipt, .txn-opening_balance { background:#d1e7dd; color:#0a3622; }
+.txn-split   { background:#cfe2ff; color:#084298; }
+.txn-merge   { background:#e2d9f3; color:#432874; }
+.txn-transfer { background:#fff3cd; color:#664d03; }
+.txn-manufacturing_issue { background:#ffe5d0; color:#783206; }
+.txn-manufacturing_return { background:#d1e7dd; color:#0a3622; }
+.txn-memo_issue   { background:#fff3cd; color:#664d03; }
+.txn-memo_return  { background:#d1e7dd; color:#0a3622; }
+.txn-count_correction { background:#f8d7da; color:#58151c; }
+
+/* ── UAT scenario cards ─────────────────────────────────────────────────── */
+.uat-scenario { border-left: 4px solid var(--gem-teal); }
+.uat-scenario .uat-status { min-width: 120px; }
+.uat-step     { background:#f8f9fa; border-radius:.4rem; padding:.5rem .75rem; margin-bottom:.4rem; font-size:.82rem; }
+.uat-expected { color: #155724; font-style: italic; }
+
+/* ── Genealogy tree ─────────────────────────────────────────────────────── */
+.gene-node { border:1px solid #dee2e6; border-radius:.4rem; padding:.4rem .8rem; display:inline-block; background:#fff; font-size:.8rem; }
+.gene-child { margin-left: 2rem; border-left: 2px dashed #adb5bd; padding-left: 1rem; }
+
+/* ── Responsive tweaks ─────────────────────────────────────────────────── */
+@media (max-width:768px) {
+  .navbar .d-flex { flex-wrap: wrap; gap: .3rem !important; }
+}
