@@ -23,6 +23,38 @@ function available(p) {
   };
 }
 
+/** Block operations on closed, merged, or quarantined parcels (unless explicitly allowed). */
+function assertOperable(p, { allowQuarantine = false } = {}) {
+  if (!p) {
+    const err = new Error('Parcel not found');
+    err.status = 404;
+    throw err;
+  }
+  if (p.status !== 'active') {
+    const err = new Error(`Parcel is ${p.status} and cannot be modified`);
+    err.status = 400;
+    throw err;
+  }
+  if (!allowQuarantine && p.lifecycle_stage === 'quarantined') {
+    const err = new Error('Parcel is quarantined — release or reclassify before operating');
+    err.status = 400;
+    throw err;
+  }
+}
+
+function costMoved(p, pieces, weightCt) {
+  if (p.pricing_unit === 'per_piece' && p.current_pieces > 0) {
+    return +(p.current_avg_cost * (pieces / p.current_pieces)).toFixed(2);
+  }
+  if (p.current_weight_ct > 0 && weightCt) {
+    return +(p.current_avg_cost * (weightCt / p.current_weight_ct)).toFixed(2);
+  }
+  if (p.current_pieces > 0) {
+    return +(p.current_avg_cost * (pieces / p.current_pieces)).toFixed(2);
+  }
+  return 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard
 // ─────────────────────────────────────────────────────────────────────────────
@@ -175,20 +207,23 @@ app.post('/api/parcels', (req, res) => {
 // Split
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/:id/split', (req, res) => {
+  try {
   const db  = getDb();
   const src = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
-  if (!src) return res.status(404).json({ error: 'Source parcel not found' });
-  if (src.status !== 'active') return res.status(400).json({ error: 'Parcel is not active' });
+  assertOperable(src);
 
   const splits = req.body.splits; // [{pieces, weight_ct, site, vault, bin_location, notes}]
   if (!splits || splits.length < 1) return res.status(400).json({ error: 'Provide at least one split' });
 
   const totalPieces = splits.reduce((s, x) => s + (x.pieces || 0), 0);
   const totalWeight = +splits.reduce((s, x) => s + (x.weight_ct || 0), 0).toFixed(4);
+  const avail = available(src);
 
-  if (totalPieces > src.current_pieces)      return res.status(400).json({ error: 'Split pieces exceed available' });
-  if (totalWeight > src.current_weight_ct + 0.0001) return res.status(400).json({ error: 'Split weight exceeds available' });
+  if (totalPieces > avail.pieces)      return res.status(400).json({ error: 'Split pieces exceed available' });
+  if (totalWeight > avail.weight + 0.0001) return res.status(400).json({ error: 'Split weight exceeds available' });
 
+  const allocMethod = req.body.allocation_method || 'proportional_weight';
+  const closeParent = !!req.body.close_parent; // full-split: close parent at zero
   const refNum = `SPLIT-${Date.now()}`;
   const childIds = [];
 
@@ -200,10 +235,15 @@ app.post('/api/parcels/:id/split', (req, res) => {
     for (const s of splits) {
       const childId  = uuidv4();
       const suffix   = String.fromCharCode(65 + childOffset + childIds.length);
-      const childNum = `${src.parcel_number}-${suffix}-${Date.now().toString(36).slice(-4)}`;
-      const costAlloc = src.current_weight_ct > 0
-        ? +(src.current_avg_cost * (s.weight_ct / src.current_weight_ct)).toFixed(2)
-        : 0;
+      const childNum = s.parcel_number || `${src.parcel_number}-${suffix}-${Date.now().toString(36).slice(-4)}`;
+      let costAlloc;
+      if (allocMethod === 'proportional_pieces' && src.current_pieces > 0) {
+        costAlloc = +(src.current_avg_cost * ((s.pieces || 0) / src.current_pieces)).toFixed(2);
+      } else if (allocMethod === 'manual' && s.cost != null) {
+        costAlloc = +Number(s.cost).toFixed(2);
+      } else {
+        costAlloc = costMoved(src, s.pieces || 0, s.weight_ct || 0);
+      }
 
       db.prepare(`
         INSERT INTO parcels (
@@ -250,8 +290,8 @@ app.post('/api/parcels/:id/split', (req, res) => {
       db.prepare(`
         INSERT INTO parcel_relationships
           (parent_parcel_id, child_parcel_id, relationship_type, pieces_moved, weight_moved_ct, cost_allocated, allocation_method, notes)
-        VALUES (@par, @chi, 'split', @p, @w, @c, 'proportional_weight', @n)
-      `).run({ par: src.id, chi: childId, p: s.pieces || 0, w: s.weight_ct || 0, c: costAlloc, n: s.notes || null });
+        VALUES (@par, @chi, 'split', @p, @w, @c, @method, @n)
+      `).run({ par: src.id, chi: childId, p: s.pieces || 0, w: s.weight_ct || 0, c: costAlloc, method: allocMethod, n: s.notes || null });
 
       // Child opening-balance transaction
       db.prepare(`
@@ -280,15 +320,18 @@ app.post('/api/parcels/:id/split', (req, res) => {
     // Reduce parent
     const newPieces = src.current_pieces - totalPieces;
     const newWeight = +(src.current_weight_ct - totalWeight).toFixed(4);
-    const costReduced = +(src.current_avg_cost * (totalWeight / src.current_weight_ct)).toFixed(2);
+    const costReduced = costMoved(src, totalPieces, totalWeight);
+    const closeNow = closeParent || (newPieces === 0 && newWeight <= 0.0001);
 
     db.prepare(`
       UPDATE parcels SET
         current_pieces = @p, current_weight_ct = @w,
         current_avg_cost = current_avg_cost - @c,
+        status = CASE WHEN @close THEN 'closed' ELSE status END,
+        lifecycle_stage = CASE WHEN @close THEN 'closed' ELSE lifecycle_stage END,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = @id
-    `).run({ p: newPieces, w: newWeight, c: costReduced, id: src.id });
+    `).run({ p: newPieces, w: newWeight, c: costReduced, close: closeNow ? 1 : 0, id: src.id });
 
     // Parent split transaction
     db.prepare(`
@@ -308,28 +351,52 @@ app.post('/api/parcels/:id/split', (req, res) => {
       dp: -totalPieces, dw: -totalWeight, dc: -costReduced,
       ap: newPieces, aw: newWeight,
       date: today(), by: req.body.created_by || 'uat_user',
-      notes: `Split into ${splits.length} child parcel(s)`,
+      notes: `Split into ${splits.length} child parcel(s)` + (closeNow ? ' (parent closed)' : ''),
     });
   })();
 
-  res.json({ message: 'Split successful', children: childIds });
+  res.json({ message: 'Split successful', children: childIds, parent_closed: closeParent || (src.current_pieces - totalPieces === 0) });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Merge
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/merge', (req, res) => {
+  try {
   const db = getDb();
   const { source_ids, target_parcel_number, created_by } = req.body;
   if (!source_ids || source_ids.length < 2) return res.status(400).json({ error: 'Provide at least 2 source parcels' });
 
   const sources = source_ids.map(id => db.prepare('SELECT * FROM parcels WHERE id = ?').get(id));
   if (sources.some(s => !s))        return res.status(404).json({ error: 'One or more source parcels not found' });
-  if (sources.some(s => s.status !== 'active')) return res.status(400).json({ error: 'All source parcels must be active' });
+  for (const s of sources) assertOperable(s);
 
-  // Basic compatibility: same material origin
+  // Compatibility rules (non-negotiable)
   const origins = [...new Set(sources.map(s => s.material_origin))];
   if (origins.length > 1) return res.status(400).json({ error: 'Cannot merge natural and lab-grown material' });
+  if (origins[0] === 'unknown') return res.status(400).json({ error: 'Cannot merge parcels with unknown material origin' });
+
+  const materials = [...new Set(sources.map(s => s.material))];
+  if (materials.length > 1) return res.status(400).json({ error: 'Cannot merge different materials' });
+
+  const owners = [...new Set(sources.map(s => s.owner))];
+  if (owners.length > 1) return res.status(400).json({ error: 'Cannot merge parcels with different ownership' });
+
+  const entities = [...new Set(sources.map(s => s.legal_entity))];
+  if (entities.length > 1) return res.status(400).json({ error: 'Cannot merge parcels from different legal entities' });
+
+  const treatments = [...new Set(sources.map(s => s.treatment || 'none'))];
+  if (treatments.length > 1) return res.status(400).json({ error: 'Cannot merge parcels with incompatible treatments' });
+
+  const costMethods = [...new Set(sources.map(s => s.pricing_unit))];
+  if (costMethods.length > 1) return res.status(400).json({ error: 'Cannot merge parcels with incompatible cost/pricing methods' });
+
+  if (sources.some(s => s.reserved_pieces > 0 || s.memo_pieces > 0 || s.wip_pieces > 0)) {
+    return res.status(400).json({ error: 'Cannot merge parcels with active reservations, memos, or WIP' });
+  }
 
   const totalPieces = sources.reduce((s, p) => s + p.current_pieces, 0);
   const totalWeight = +sources.reduce((s, p) => s + p.current_weight_ct, 0).toFixed(4);
@@ -421,15 +488,19 @@ app.post('/api/parcels/merge', (req, res) => {
   })();
 
   res.json({ message: 'Merge successful', merged_parcel_id: newId, parcel_number: newNum });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Transfer
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/:id/transfer', (req, res) => {
+  try {
   const db = getDb();
   const p  = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
-  if (!p) return res.status(404).json({ error: 'Parcel not found' });
+  assertOperable(p, { allowQuarantine: true }); // quarantine parcels may be relocated
 
   const { site, vault, bin_location, custodian, reason, notes, created_by } = req.body;
 
@@ -463,22 +534,26 @@ app.post('/api/parcels/:id/transfer', (req, res) => {
   });
 
   res.json({ message: 'Transfer recorded' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Manufacturing Issue
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/:id/issue', (req, res) => {
+  try {
   const db = getDb();
   const p  = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
-  if (!p) return res.status(404).json({ error: 'Parcel not found' });
+  assertOperable(p);
 
   const { pieces, weight_ct, work_order, notes, created_by } = req.body;
   const avail = available(p);
   if (pieces > avail.pieces) return res.status(400).json({ error: 'Insufficient available pieces' });
-  if (weight_ct > avail.weight + 0.0001) return res.status(400).json({ error: 'Insufficient available weight' });
+  if ((weight_ct || 0) > avail.weight + 0.0001) return res.status(400).json({ error: 'Insufficient available weight' });
 
-  const costMoved = +(p.current_avg_cost * (weight_ct / p.current_weight_ct)).toFixed(2);
+  const moved = costMoved(p, pieces, weight_ct || 0);
 
   db.prepare(`
     UPDATE parcels SET
@@ -487,7 +562,7 @@ app.post('/api/parcels/:id/issue', (req, res) => {
       lifecycle_stage = CASE WHEN current_pieces - reserved_pieces - memo_pieces - wip_pieces - @p <= 0 THEN 'in_production' ELSE lifecycle_stage END,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = @id
-  `).run({ p: pieces, w: weight_ct, id: p.id });
+  `).run({ p: pieces, w: weight_ct || 0, id: p.id });
 
   db.prepare(`
     INSERT INTO parcel_transactions
@@ -505,43 +580,63 @@ app.post('/api/parcels/:id/issue', (req, res) => {
   `).run({
     id: uuidv4(), pid: p.id, ref: work_order || null,
     bp: p.current_pieces, bw: p.current_weight_ct,
-    dp: -pieces, dw: -weight_ct, dc: -costMoved,
+    dp: -pieces, dw: -(weight_ct || 0), dc: -moved,
     lf: [p.vault, p.bin_location].filter(Boolean).join(' / ') || null,
     cf: p.custodian, date: today(), by: created_by || 'uat_user',
     notes: notes || `Issued to ${work_order || 'production'}`,
   });
 
-  res.json({ message: 'Issue recorded', cost_moved: costMoved });
+  res.json({ message: 'Issue recorded', cost_moved: moved });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Manufacturing Return
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/:id/return', (req, res) => {
+  try {
   const db = getDb();
   const p  = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
-  if (!p) return res.status(404).json({ error: 'Parcel not found' });
+  assertOperable(p);
 
-  const { pieces, weight_ct, broken_pieces, lost_pieces, work_order, notes, created_by } = req.body;
+  const { pieces, weight_ct, broken_pieces, lost_pieces, consumed_pieces, work_order, notes, created_by } = req.body;
   const returned = pieces || 0;
   const broken   = broken_pieces || 0;
   const lost     = lost_pieces || 0;
+  const consumed = consumed_pieces || 0;
+  const settled  = returned + broken + lost + consumed;
 
-  if (returned + broken + lost > p.wip_pieces) return res.status(400).json({ error: 'Return exceeds WIP quantity' });
+  if (settled <= 0) return res.status(400).json({ error: 'Provide returned, broken, lost, and/or consumed pieces' });
+  if (settled > p.wip_pieces) return res.status(400).json({ error: 'Return exceeds WIP quantity' });
 
-  const consumed = p.wip_pieces - returned - broken - lost;
+  // Weight leaving WIP: returned weight stays in parcel; broken/lost/consumed weight leaves inventory.
+  // If only one weight is supplied, treat it as the total weight settled out of WIP.
+  const settledWeight = weight_ct || 0;
+  const leaveInventoryWeight = settled > 0 && returned < settled
+    ? +(settledWeight * ((broken + lost + consumed) / settled)).toFixed(4)
+    : (returned === 0 ? settledWeight : 0);
+
+  const newPieces = p.current_pieces - broken - lost - consumed;
+  const newWeight = +(p.current_weight_ct - leaveInventoryWeight).toFixed(4);
+  const newWip = p.wip_pieces - settled;
+  const newWipWt = Math.max(0, +(p.wip_weight_ct - settledWeight).toFixed(4));
 
   db.prepare(`
     UPDATE parcels SET
-      wip_pieces = wip_pieces - @total,
-      wip_weight_ct = wip_weight_ct - @w,
+      wip_pieces = @wip,
+      wip_weight_ct = @wipw,
       damaged_pieces = damaged_pieces + @broken,
-      current_pieces = current_pieces - @consumed - @broken - @lost,
-      current_weight_ct = ROUND(current_weight_ct - @w, 4),
-      lifecycle_stage = 'available',
+      current_pieces = @np,
+      current_weight_ct = @nw,
+      lifecycle_stage = CASE WHEN @wip > 0 THEN 'in_production'
+                             WHEN reserved_pieces > 0 THEN 'reserved'
+                             WHEN memo_pieces > 0 THEN 'on_memo'
+                             ELSE 'available' END,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = @id
-  `).run({ total: returned + broken + lost, w: weight_ct || 0, broken, lost, consumed, id: p.id });
+  `).run({ wip: newWip, wipw: newWipWt, broken, np: newPieces, nw: newWeight, id: p.id });
 
   db.prepare(`
     INSERT INTO parcel_transactions
@@ -556,24 +651,27 @@ app.post('/api/parcels/:id/return', (req, res) => {
   `).run({
     id: uuidv4(), pid: p.id, ref: work_order || null,
     bp: p.current_pieces, bw: p.current_weight_ct,
-    dp: returned - p.wip_pieces,
-    dw: -(weight_ct || 0),
-    ap: p.current_pieces + returned - p.wip_pieces,
-    aw: +(p.current_weight_ct - (weight_ct || 0)).toFixed(4),
+    dp: -(broken + lost + consumed),
+    dw: -leaveInventoryWeight,
+    ap: newPieces, aw: newWeight,
     date: today(), by: created_by || 'uat_user',
-    notes: notes || `Returned ${returned} pcs, broken: ${broken}, lost: ${lost}`,
+    notes: notes || `Returned ${returned} pcs, broken: ${broken}, lost: ${lost}, consumed: ${consumed}`,
   });
 
-  res.json({ message: 'Return recorded', returned, broken, lost, consumed });
+  res.json({ message: 'Return recorded', returned, broken, lost, consumed, settled });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Memo Issue
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/:id/memo', (req, res) => {
+  try {
   const db = getDb();
   const p  = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
-  if (!p) return res.status(404).json({ error: 'Parcel not found' });
+  assertOperable(p);
 
   const { pieces, weight_ct, customer, memo_ref, notes, created_by } = req.body;
   const avail = available(p);
@@ -610,15 +708,19 @@ app.post('/api/parcels/:id/memo', (req, res) => {
   });
 
   res.json({ message: 'Memo issue recorded' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Memo Return
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/:id/memo-return', (req, res) => {
+  try {
   const db = getDb();
   const p  = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
-  if (!p) return res.status(404).json({ error: 'Parcel not found' });
+  assertOperable(p);
 
   const { pieces, weight_ct, memo_ref, notes, created_by } = req.body;
   if (pieces > p.memo_pieces) return res.status(400).json({ error: 'Return pieces exceed memo balance' });
@@ -650,18 +752,23 @@ app.post('/api/parcels/:id/memo-return', (req, res) => {
   });
 
   res.json({ message: 'Memo return recorded' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Count / Weight Adjustment
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/parcels/:id/adjust', (req, res) => {
+  try {
   const db = getDb();
   const p  = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
-  if (!p) return res.status(404).json({ error: 'Parcel not found' });
+  assertOperable(p, { allowQuarantine: true });
 
   const { new_pieces, new_weight_ct, reason, approved_by, notes, created_by } = req.body;
   if (new_pieces === undefined && new_weight_ct === undefined) return res.status(400).json({ error: 'Provide new_pieces or new_weight_ct' });
+  if (!approved_by) return res.status(400).json({ error: 'Count corrections require approved_by (maker-checker)' });
 
   const adjPieces = new_pieces !== undefined ? new_pieces - p.current_pieces : 0;
   const adjWeight = new_weight_ct !== undefined ? +(new_weight_ct - p.current_weight_ct).toFixed(4) : 0;
@@ -695,6 +802,499 @@ app.post('/api/parcels/:id/adjust', (req, res) => {
   });
 
   res.json({ message: 'Adjustment recorded', pieces_delta: adjPieces, weight_delta: adjWeight });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reservation / Unreservation
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/parcels/:id/reserve', (req, res) => {
+  try {
+    const db = getDb();
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    assertOperable(p);
+    const { pieces, weight_ct, reservation_type, order_reference, customer, reserved_by, notes } = req.body;
+    const avail = available(p);
+    if (!pieces || pieces <= 0) return res.status(400).json({ error: 'pieces required' });
+    if (pieces > avail.pieces) return res.status(400).json({ error: 'Insufficient available pieces' });
+    if ((weight_ct || 0) > avail.weight + 0.0001) return res.status(400).json({ error: 'Insufficient available weight' });
+
+    db.prepare(`
+      UPDATE parcels SET reserved_pieces = reserved_pieces + @p, reserved_weight_ct = reserved_weight_ct + @w,
+        lifecycle_stage = CASE WHEN lifecycle_stage = 'available' THEN 'reserved' ELSE lifecycle_stage END,
+        updated_at = CURRENT_TIMESTAMP WHERE id = @id
+    `).run({ p: pieces, w: weight_ct || 0, id: p.id });
+
+    const r = db.prepare(`
+      INSERT INTO parcel_reservations
+        (parcel_id, reserved_pieces, reserved_weight, reservation_type, order_reference, customer, reserved_by, notes)
+      VALUES (@pid, @p, @w, @type, @ord, @cust, @by, @notes)
+    `).run({
+      pid: p.id, p: pieces, w: weight_ct || 0,
+      type: reservation_type || 'order', ord: order_reference || null,
+      cust: customer || null, by: reserved_by || 'uat_user', notes: notes || null,
+    });
+
+    db.prepare(`
+      INSERT INTO parcel_transactions
+        (id, parcel_id, transaction_type, reference_number,
+         before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+         after_pieces, after_weight_ct, physical_date, posting_date, created_by, reason_code, notes)
+      VALUES
+        (@id, @pid, 'reservation', @ref, @bp, @bw, @dp, @dw, 0, @bp, @bw, @date, @date, @by, 'RESERVE', @notes)
+    `).run({
+      id: uuidv4(), pid: p.id, ref: order_reference || null,
+      bp: p.current_pieces, bw: p.current_weight_ct,
+      dp: -pieces, dw: -(weight_ct || 0),
+      date: today(), by: reserved_by || 'uat_user',
+      notes: notes || `Reserved ${pieces} pcs for ${customer || order_reference || 'order'}`,
+    });
+
+    res.json({ message: 'Reservation recorded' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+app.post('/api/parcels/:id/unreserve', (req, res) => {
+  try {
+    const db = getDb();
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    assertOperable(p);
+    const { pieces, weight_ct, reservation_id, notes, created_by } = req.body;
+    const pcs = pieces ?? p.reserved_pieces;
+    const wt  = weight_ct ?? p.reserved_weight_ct;
+    if (pcs > p.reserved_pieces) return res.status(400).json({ error: 'Unreserve exceeds reserved balance' });
+
+    db.prepare(`
+      UPDATE parcels SET reserved_pieces = reserved_pieces - @p, reserved_weight_ct = reserved_weight_ct - @w,
+        lifecycle_stage = CASE WHEN reserved_pieces - @p <= 0 AND memo_pieces = 0 AND wip_pieces = 0 THEN 'available' ELSE lifecycle_stage END,
+        updated_at = CURRENT_TIMESTAMP WHERE id = @id
+    `).run({ p: pcs, w: wt, id: p.id });
+
+    if (reservation_id) {
+      db.prepare("UPDATE parcel_reservations SET status = 'released' WHERE id = ?").run(reservation_id);
+    } else {
+      db.prepare("UPDATE parcel_reservations SET status = 'released' WHERE parcel_id = ? AND status = 'active'").run(p.id);
+    }
+
+    db.prepare(`
+      INSERT INTO parcel_transactions
+        (id, parcel_id, transaction_type, before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+         after_pieces, after_weight_ct, physical_date, posting_date, created_by, reason_code, notes)
+      VALUES
+        (@id, @pid, 'unreservation', @bp, @bw, @dp, @dw, 0, @bp, @bw, @date, @date, @by, 'UNRESERVE', @notes)
+    `).run({
+      id: uuidv4(), pid: p.id, bp: p.current_pieces, bw: p.current_weight_ct,
+      dp: pcs, dw: wt, date: today(), by: created_by || 'uat_user',
+      notes: notes || `Released reservation of ${pcs} pcs`,
+    });
+
+    res.json({ message: 'Reservation released' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sale / Consumption
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/parcels/:id/sale', (req, res) => {
+  try {
+    const db = getDb();
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    assertOperable(p);
+    const { pieces, weight_ct, sales_ref, customer, notes, created_by } = req.body;
+    const avail = available(p);
+    if (!pieces || pieces <= 0) return res.status(400).json({ error: 'pieces required' });
+    if (pieces > avail.pieces) return res.status(400).json({ error: 'Insufficient available pieces' });
+    if ((weight_ct || 0) > avail.weight + 0.0001) return res.status(400).json({ error: 'Insufficient available weight' });
+
+    const moved = costMoved(p, pieces, weight_ct || 0);
+    const newPieces = p.current_pieces - pieces;
+    const newWeight = +(p.current_weight_ct - (weight_ct || 0)).toFixed(4);
+    const closeNow = newPieces === 0 && newWeight <= 0.0001;
+
+    db.prepare(`
+      UPDATE parcels SET current_pieces = @p, current_weight_ct = @w,
+        current_avg_cost = current_avg_cost - @c,
+        status = CASE WHEN @close THEN 'closed' ELSE status END,
+        lifecycle_stage = CASE WHEN @close THEN 'closed' ELSE lifecycle_stage END,
+        updated_at = CURRENT_TIMESTAMP WHERE id = @id
+    `).run({ p: newPieces, w: newWeight, c: moved, close: closeNow ? 1 : 0, id: p.id });
+
+    db.prepare(`
+      INSERT INTO parcel_transactions
+        (id, parcel_id, transaction_type, reference_number,
+         before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+         after_pieces, after_weight_ct, custodian_to,
+         physical_date, posting_date, created_by, reason_code, notes)
+      VALUES
+        (@id, @pid, 'sale', @ref, @bp, @bw, @dp, @dw, @dc, @ap, @aw, @ct,
+         @date, @date, @by, 'SALE', @notes)
+    `).run({
+      id: uuidv4(), pid: p.id, ref: sales_ref || null,
+      bp: p.current_pieces, bw: p.current_weight_ct,
+      dp: -pieces, dw: -(weight_ct || 0), dc: -moved,
+      ap: newPieces, aw: newWeight, ct: customer || null,
+      date: today(), by: created_by || 'uat_user',
+      notes: notes || `Sold ${pieces} pcs to ${customer || 'customer'}`,
+    });
+
+    res.json({ message: 'Sale recorded', cost_cogs: moved, closed: closeNow });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regrade / Resort
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/parcels/:id/regrade', (req, res) => {
+  try {
+    const db = getDb();
+    const src = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    assertOperable(src);
+    const { outputs, process_loss_weight_ct, process_loss_pieces, approved_by, notes, created_by, tolerance_ct } = req.body;
+    // outputs: [{parcel_number, pieces, weight_ct, color, clarity, assortment_grade, notes}]
+    if (!outputs || outputs.length < 1) return res.status(400).json({ error: 'Provide at least one output grade' });
+
+    const outPieces = outputs.reduce((s, o) => s + (o.pieces || 0), 0);
+    const outWeight = +outputs.reduce((s, o) => s + (o.weight_ct || 0), 0).toFixed(4);
+    const lossPcs   = process_loss_pieces || 0;
+    const lossWt    = process_loss_weight_ct || 0;
+    const unexplainedPcs = src.current_pieces - outPieces - lossPcs;
+    const unexplainedWt  = +(src.current_weight_ct - outWeight - lossWt).toFixed(4);
+    const tol = tolerance_ct != null ? tolerance_ct : 0.02;
+
+    if (Math.abs(unexplainedWt) > tol && !approved_by) {
+      return res.status(400).json({
+        error: `Unexplained weight variance ${unexplainedWt} ct exceeds tolerance ${tol} ct — approved_by required`,
+        unexplained_weight_ct: unexplainedWt,
+        unexplained_pieces: unexplainedPcs,
+      });
+    }
+
+    const refNum = `REGRADE-${Date.now()}`;
+    const children = [];
+
+    db.transaction(() => {
+      for (const o of outputs) {
+        const childId = uuidv4();
+        const childNum = o.parcel_number || `${src.parcel_number}-G${children.length + 1}-${Date.now().toString(36).slice(-4)}`;
+        const costAlloc = costMoved(src, o.pieces || 0, o.weight_ct || 0);
+
+        db.prepare(`
+          INSERT INTO parcels (
+            id, parcel_number, parent_parcel_id, root_parcel_id,
+            status, lifecycle_stage, material, material_origin, condition, shape,
+            size_min_mm, size_max_mm, color, color_range_max, clarity, clarity_range_max,
+            treatment, fluorescence, origin_country, assortment_grade,
+            original_pieces, current_pieces, original_weight_ct, current_weight_ct,
+            purchase_rate, pricing_unit, landed_cost, current_avg_cost, currency,
+            site, vault, bin_location, custodian, owner, legal_entity,
+            screening_status, created_by, notes
+          ) VALUES (
+            @id, @num, @parent, @root, 'active', 'available',
+            @mat, @orig, @cond, @shape, @smin, @smax, @col, @colmax, @cla, @clamax,
+            @treat, @fluor, @origin, @grade,
+            @pieces, @pieces, @weight, @weight,
+            @rate, @unit, @cost, @cost, @currency,
+            @site, @vault, @bin, @cust, @owner, @entity,
+            @screen, @by, @notes
+          )
+        `).run({
+          id: childId, num: childNum, parent: src.id, root: src.root_parcel_id || src.id,
+          mat: src.material, orig: src.material_origin, cond: src.condition, shape: src.shape,
+          smin: src.size_min_mm, smax: src.size_max_mm,
+          col: o.color || src.color, colmax: o.color_range_max || src.color_range_max,
+          cla: o.clarity || src.clarity, clamax: o.clarity_range_max || src.clarity_range_max,
+          treat: src.treatment, fluor: src.fluorescence, origin: src.origin_country,
+          grade: o.assortment_grade || 'regraded',
+          pieces: o.pieces || 0, weight: o.weight_ct || 0,
+          rate: src.purchase_rate, unit: src.pricing_unit, cost: costAlloc, currency: src.currency,
+          site: o.site || src.site, vault: o.vault || src.vault, bin: o.bin_location || null,
+          cust: src.custodian, owner: src.owner, entity: src.legal_entity,
+          screen: src.screening_status, by: created_by || 'uat_user',
+          notes: o.notes || `Regrade from ${src.parcel_number}`,
+        });
+
+        db.prepare(`
+          INSERT INTO parcel_relationships
+            (parent_parcel_id, child_parcel_id, relationship_type, pieces_moved, weight_moved_ct, cost_allocated, allocation_method, notes)
+          VALUES (@par, @chi, 'regrade', @p, @w, @c, 'proportional_weight', @n)
+        `).run({ par: src.id, chi: childId, p: o.pieces || 0, w: o.weight_ct || 0, c: costAlloc, n: o.notes || null });
+
+        db.prepare(`
+          INSERT INTO parcel_transactions
+            (id, parcel_id, transaction_type, reference_number, related_parcel_id,
+             before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+             after_pieces, after_weight_ct, physical_date, posting_date, created_by, reason_code, notes)
+          VALUES
+            (@id, @pid, 'opening_balance', @ref, @rel, 0, 0, @p, @w, @c, @p, @w, @date, @date, @by, 'REGRADE_OUT', @notes)
+        `).run({
+          id: uuidv4(), pid: childId, ref: refNum, rel: src.id,
+          p: o.pieces || 0, w: o.weight_ct || 0, c: costAlloc,
+          date: today(), by: created_by || 'uat_user',
+          notes: `Created by regrade from ${src.parcel_number}`,
+        });
+
+        children.push({ id: childId, parcel_number: childNum });
+      }
+
+      db.prepare(`
+        UPDATE parcels SET current_pieces = 0, current_weight_ct = 0, current_avg_cost = 0,
+          status = 'closed', lifecycle_stage = 'closed', updated_at = CURRENT_TIMESTAMP
+        WHERE id = @id
+      `).run({ id: src.id });
+
+      db.prepare(`
+        INSERT INTO parcel_transactions
+          (id, parcel_id, transaction_type, reference_number,
+           before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+           after_pieces, after_weight_ct, physical_date, posting_date,
+           created_by, approved_by, reason_code, notes)
+        VALUES
+          (@id, @pid, 'regrade', @ref, @bp, @bw, @dp, @dw, @dc, 0, 0, @date, @date, @by, @apv, 'REGRADE', @notes)
+      `).run({
+        id: uuidv4(), pid: src.id, ref: refNum,
+        bp: src.current_pieces, bw: src.current_weight_ct,
+        dp: -src.current_pieces, dw: -src.current_weight_ct, dc: -src.current_avg_cost,
+        date: today(), by: created_by || 'uat_user', apv: approved_by || null,
+        notes: notes || `Regraded into ${outputs.length} grades; process loss ${lossWt} ct / ${lossPcs} pcs; unexplained ${unexplainedWt} ct`,
+      });
+    })();
+
+    res.json({
+      message: 'Regrade successful',
+      children,
+      process_loss_weight_ct: lossWt,
+      process_loss_pieces: lossPcs,
+      unexplained_weight_ct: unexplainedWt,
+      unexplained_pieces: unexplainedPcs,
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ownership transfer & Quarantine release
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/parcels/:id/ownership', (req, res) => {
+  try {
+    const db = getDb();
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    assertOperable(p, { allowQuarantine: true });
+    const { owner, legal_entity, approved_by, notes, created_by } = req.body;
+    if (!owner) return res.status(400).json({ error: 'owner required' });
+    if (!approved_by) return res.status(400).json({ error: 'Ownership transfer requires approved_by' });
+
+    db.prepare(`
+      UPDATE parcels SET owner = @owner, legal_entity = COALESCE(@entity, legal_entity),
+        updated_at = CURRENT_TIMESTAMP WHERE id = @id
+    `).run({ owner, entity: legal_entity || null, id: p.id });
+
+    db.prepare(`
+      INSERT INTO parcel_transactions
+        (id, parcel_id, transaction_type, before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+         after_pieces, after_weight_ct, physical_date, posting_date, created_by, approved_by, reason_code, notes)
+      VALUES
+        (@id, @pid, 'ownership_transfer', @bp, @bw, 0, 0, 0, @bp, @bw, @date, @date, @by, @apv, 'OWNERSHIP', @notes)
+    `).run({
+      id: uuidv4(), pid: p.id, bp: p.current_pieces, bw: p.current_weight_ct,
+      date: today(), by: created_by || 'uat_user', apv: approved_by,
+      notes: notes || `Ownership changed from ${p.owner} to ${owner}`,
+    });
+
+    res.json({ message: 'Ownership transferred', previous_owner: p.owner, owner });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+app.post('/api/parcels/:id/quarantine', (req, res) => {
+  try {
+    const db = getDb();
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Parcel not found' });
+    if (p.status !== 'active') return res.status(400).json({ error: 'Parcel is not active' });
+    const { reason, notes, created_by } = req.body;
+
+    db.prepare(`
+      UPDATE parcels SET lifecycle_stage = 'quarantined', screening_status = 'pending',
+        updated_at = CURRENT_TIMESTAMP WHERE id = @id
+    `).run({ id: p.id });
+
+    db.prepare(`
+      INSERT INTO parcel_transactions
+        (id, parcel_id, transaction_type, before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+         after_pieces, after_weight_ct, physical_date, posting_date, created_by, reason_code, notes)
+      VALUES
+        (@id, @pid, 'quarantine', @bp, @bw, 0, 0, 0, @bp, @bw, @date, @date, @by, 'QUARANTINE', @notes)
+    `).run({
+      id: uuidv4(), pid: p.id, bp: p.current_pieces, bw: p.current_weight_ct,
+      date: today(), by: created_by || 'uat_user',
+      notes: notes || reason || 'Placed in quarantine',
+    });
+
+    res.json({ message: 'Parcel quarantined' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+app.post('/api/parcels/:id/release-quarantine', (req, res) => {
+  try {
+    const db = getDb();
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Parcel not found' });
+    if (p.lifecycle_stage !== 'quarantined') return res.status(400).json({ error: 'Parcel is not quarantined' });
+
+    const { material_origin, material, screening_status, approved_by, notes, created_by } = req.body;
+    if (!approved_by) return res.status(400).json({ error: 'Quarantine release requires approved_by' });
+    if (!material_origin || material_origin === 'unknown') {
+      return res.status(400).json({ error: 'material_origin must be resolved before release' });
+    }
+
+    db.prepare(`
+      UPDATE parcels SET
+        lifecycle_stage = 'available',
+        material_origin = @orig,
+        material = COALESCE(@mat, material),
+        screening_status = @screen,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `).run({
+      orig: material_origin, mat: material || null,
+      screen: screening_status || 'screened', id: p.id,
+    });
+
+    db.prepare(`
+      INSERT INTO parcel_transactions
+        (id, parcel_id, transaction_type, before_pieces, before_weight_ct, pieces_delta, weight_delta_ct, cost_delta,
+         after_pieces, after_weight_ct, physical_date, posting_date, created_by, approved_by, reason_code, notes)
+      VALUES
+        (@id, @pid, 'quarantine_release', @bp, @bw, 0, 0, 0, @bp, @bw, @date, @date, @by, @apv, 'RELEASE', @notes)
+    `).run({
+      id: uuidv4(), pid: p.id, bp: p.current_pieces, bw: p.current_weight_ct,
+      date: today(), by: created_by || 'uat_user', apv: approved_by,
+      notes: notes || `Released from quarantine as ${material_origin}`,
+    });
+
+    res.json({ message: 'Quarantine released', material_origin });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Certificates
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/parcels/:id/certificates', (req, res) => {
+  try {
+    const db = getDb();
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Parcel not found' });
+    const { cert_type, cert_number, issued_by, issued_date, expiry_date, notes } = req.body;
+    if (!cert_type) return res.status(400).json({ error: 'cert_type required' });
+
+    db.prepare(`
+      INSERT INTO parcel_certificates
+        (parcel_id, cert_type, cert_number, issued_by, issued_date, expiry_date, is_valid, notes)
+      VALUES (@pid, @type, @num, @by, @issued, @exp, 1, @notes)
+    `).run({
+      pid: p.id, type: cert_type, num: cert_number || null, by: issued_by || null,
+      issued: issued_date || today(), exp: expiry_date || null, notes: notes || null,
+    });
+
+    res.status(201).json({ message: 'Certificate attached' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Disposition audit — trace every carat from a root parcel
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/parcels/:id/disposition', (req, res) => {
+  const db = getDb();
+  const start = db.prepare('SELECT * FROM parcels WHERE id = ?').get(req.params.id);
+  if (!start) return res.status(404).json({ error: 'Parcel not found' });
+
+  const rootId = start.root_parcel_id || start.id;
+  const root = db.prepare('SELECT * FROM parcels WHERE id = ?').get(rootId);
+
+  function collectFamily(id, acc = []) {
+    const p = db.prepare('SELECT * FROM parcels WHERE id = ?').get(id);
+    if (!p) return acc;
+    acc.push(p);
+    const kids = db.prepare('SELECT child_parcel_id FROM parcel_relationships WHERE parent_parcel_id = ?').all(id);
+    for (const k of kids) collectFamily(k.child_parcel_id, acc);
+    return acc;
+  }
+
+  const family = collectFamily(rootId);
+  const txns = db.prepare(`
+    SELECT t.*, p.parcel_number FROM parcel_transactions t
+    JOIN parcels p ON p.id = t.parcel_id
+    WHERE t.parcel_id IN (${family.map(() => '?').join(',')})
+    ORDER BY t.physical_date, t.created_at
+  `).all(family.map(f => f.id));
+
+  const active = family.filter(f => f.status === 'active');
+  const closed = family.filter(f => f.status !== 'active');
+  const currentPieces = active.reduce((s, f) => s + f.current_pieces, 0);
+  const currentWeight = +active.reduce((s, f) => s + f.current_weight_ct, 0).toFixed(4);
+  const currentValue  = +active.reduce((s, f) => s + f.current_avg_cost, 0).toFixed(2);
+
+  const sold = txns.filter(t => t.transaction_type === 'sale')
+    .reduce((a, t) => ({ pieces: a.pieces + Math.abs(t.pieces_delta), weight: +(a.weight + Math.abs(t.weight_delta_ct)).toFixed(4) }), { pieces: 0, weight: 0 });
+  const lost = txns.filter(t => ['loss', 'count_correction'].includes(t.transaction_type) && t.pieces_delta < 0)
+    .reduce((a, t) => ({ pieces: a.pieces + Math.abs(t.pieces_delta), weight: +(a.weight + Math.abs(t.weight_delta_ct)).toFixed(4) }), { pieces: 0, weight: 0 });
+
+  res.json({
+    root: { id: root.id, parcel_number: root.parcel_number, original_pieces: root.original_pieces, original_weight_ct: root.original_weight_ct },
+    family: family.map(f => ({
+      id: f.id, parcel_number: f.parcel_number, status: f.status, lifecycle_stage: f.lifecycle_stage,
+      current_pieces: f.current_pieces, current_weight_ct: f.current_weight_ct, current_avg_cost: f.current_avg_cost,
+      site: f.site, vault: f.vault, owner: f.owner,
+    })),
+    summary: {
+      original_pieces: root.original_pieces,
+      original_weight_ct: root.original_weight_ct,
+      remaining_pieces: currentPieces,
+      remaining_weight_ct: currentWeight,
+      remaining_value: currentValue,
+      sold_pieces: sold.pieces,
+      sold_weight_ct: sold.weight,
+      adjusted_or_lost_pieces: lost.pieces,
+      family_count: family.length,
+      active_count: active.length,
+      closed_count: closed.length,
+    },
+    transactions: txns,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UAT reset — reseed without restarting the process
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/uat/reset', async (req, res) => {
+  try {
+    const { spawnSync } = require('child_process');
+    const { reloadDb } = require('./src/database');
+    const result = spawnSync('node', [path.join(__dirname, 'src', 'seed.js')], { encoding: 'utf8' });
+    if (result.status !== 0) {
+      return res.status(500).json({ error: 'Seed failed', detail: result.stderr || result.stdout });
+    }
+    await reloadDb();
+    res.json({ message: 'UAT data reset to seed baseline', seed_log: (result.stdout || '').trim().split('\n').pop() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
