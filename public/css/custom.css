@@ -52,6 +52,12 @@ body { background: #f4f6f9; font-size: 0.875rem; }
 .txn-memo_issue   { background:#fff3cd; color:#664d03; }
 .txn-memo_return  { background:#d1e7dd; color:#0a3622; }
 .txn-count_correction { background:#f8d7da; color:#58151c; }
+.txn-sale, .txn-reservation { background:#cff4fc; color:#055160; }
+.txn-unreservation { background:#e2e3e5; color:#41464b; }
+.txn-regrade { background:#e2d9f3; color:#432874; }
+.txn-quarantine { background:#f8d7da; color:#58151c; }
+.txn-quarantine_release { background:#d1e7dd; color:#0a3622; }
+.txn-ownership_transfer { background:#fff3cd; color:#664d03; }
 
 /* ── UAT scenario cards ─────────────────────────────────────────────────── */
 .uat-scenario { border-left: 4px solid var(--gem-teal); }

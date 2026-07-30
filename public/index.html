@@ -15,11 +15,13 @@
   <span class="navbar-brand fw-bold">
     <i class="bi bi-gem me-2 text-warning"></i>Parcel ERP — UAT
   </span>
-  <div class="d-flex gap-2">
+  <div class="d-flex gap-2 flex-wrap">
     <button class="btn btn-sm btn-outline-warning" onclick="showView('dashboard')"><i class="bi bi-speedometer2"></i> Dashboard</button>
     <button class="btn btn-sm btn-outline-light"   onclick="showView('parcels')"><i class="bi bi-box-seam"></i> Parcels</button>
     <button class="btn btn-sm btn-outline-success" onclick="showView('receive')"><i class="bi bi-plus-circle"></i> Receive</button>
+    <button class="btn btn-sm btn-outline-primary" onclick="openMergeModal()"><i class="bi bi-union"></i> Merge</button>
     <button class="btn btn-sm btn-outline-info"    onclick="showView('uat')"><i class="bi bi-clipboard-check"></i> UAT Scenarios</button>
+    <button class="btn btn-sm btn-outline-danger"  onclick="resetUat()" title="Reset database to seed baseline"><i class="bi bi-arrow-counterclockwise"></i> Reset Data</button>
   </div>
 </nav>
 
@@ -182,9 +184,26 @@
 
   <!-- ── UAT Scenarios ──────────────────────────────────────────────────────── -->
   <div id="view-uat" class="d-none">
-    <h4 class="mb-1"><i class="bi bi-clipboard-check me-2 text-info"></i>UAT Test Scenarios</h4>
-    <p class="text-muted small mb-3">Use these guided test cases to validate the parcel management system. Check each scenario manually against the expected result.</p>
+    <div class="d-flex align-items-start justify-content-between flex-wrap gap-2 mb-3">
+      <div>
+        <h4 class="mb-1"><i class="bi bi-clipboard-check me-2 text-info"></i>UAT Test Scenarios</h4>
+        <p class="text-muted small mb-0">Guided acceptance cases for the parcel ledger. Results persist in this browser until cleared.</p>
+      </div>
+      <div class="text-end">
+        <div id="uatScore" class="fw-bold mb-1"></div>
+        <button class="btn btn-sm btn-outline-secondary" onclick="clearUatResults()">Clear Results</button>
+        <button class="btn btn-sm btn-outline-danger ms-1" onclick="resetUat()">Reset Seed Data</button>
+      </div>
+    </div>
     <div id="uatList"></div>
+  </div>
+
+  <!-- ── Disposition Audit ──────────────────────────────────────────────────── -->
+  <div id="view-disposition" class="d-none">
+    <button class="btn btn-sm btn-outline-secondary mb-3" onclick="showView('detail', currentParcelId)">
+      <i class="bi bi-arrow-left me-1"></i>Back to parcel
+    </button>
+    <div id="dispositionContent"></div>
   </div>
 
 </div><!-- /container -->
@@ -285,9 +304,10 @@
       <div class="modal-body">
         <p class="small text-muted" id="returnInfo"></p>
         <div class="mb-2"><label class="form-label">Returned Pieces</label><input class="form-control" id="retPieces" type="number" min="0" /></div>
-        <div class="mb-2"><label class="form-label">Weight Returned (ct)</label><input class="form-control" id="retWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Weight Settled from WIP (ct)</label><input class="form-control" id="retWeight" type="number" step="0.0001" /></div>
         <div class="mb-2"><label class="form-label">Broken Pieces</label><input class="form-control" id="retBroken" type="number" min="0" value="0" /></div>
         <div class="mb-2"><label class="form-label">Lost Pieces</label><input class="form-control" id="retLost" type="number" min="0" value="0" /></div>
+        <div class="mb-2"><label class="form-label">Consumed Pieces</label><input class="form-control" id="retConsumed" type="number" min="0" value="0" /></div>
         <div class="mb-2"><label class="form-label">Work Order #</label><input class="form-control" id="retWO" /></div>
         <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="retNotes" rows="2"></textarea></div>
       </div>
@@ -330,11 +350,132 @@
         <div class="mb-2"><label class="form-label">New Piece Count</label><input class="form-control" id="adjPieces" type="number" min="0" /></div>
         <div class="mb-2"><label class="form-label">New Weight (ct)</label><input class="form-control" id="adjWeight" type="number" step="0.0001" /></div>
         <div class="mb-2"><label class="form-label">Reason</label><input class="form-control" id="adjReason" /></div>
-        <div class="mb-2"><label class="form-label">Approved By</label><input class="form-control" id="adjApprover" /></div>
+        <div class="mb-2"><label class="form-label">Approved By *</label><input class="form-control" id="adjApprover" required /></div>
         <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="adjNotes" rows="2"></textarea></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-primary" onclick="doAdjust()"><i class="bi bi-calculator me-1"></i>Record Adjustment</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Memo Return Modal -->
+<div class="modal fade" id="memoReturnModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-envelope-open me-2"></i>Memo Return</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="memoReturnInfo"></p>
+        <div class="mb-2"><label class="form-label">Pieces *</label><input class="form-control" id="mrPieces" type="number" min="1" /></div>
+        <div class="mb-2"><label class="form-label">Weight (ct)</label><input class="form-control" id="mrWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Memo Reference</label><input class="form-control" id="mrRef" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="mrNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-success" onclick="doMemoReturn()">Record Memo Return</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Sale Modal -->
+<div class="modal fade" id="saleModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-receipt me-2"></i>Record Sale</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="saleInfo"></p>
+        <div class="mb-2"><label class="form-label">Pieces *</label><input class="form-control" id="salePieces" type="number" min="1" /></div>
+        <div class="mb-2"><label class="form-label">Weight (ct)</label><input class="form-control" id="saleWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Customer</label><input class="form-control" id="saleCustomer" /></div>
+        <div class="mb-2"><label class="form-label">Sales Reference</label><input class="form-control" id="saleRef" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="saleNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-success" onclick="doSale()">Record Sale</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Reserve Modal -->
+<div class="modal fade" id="reserveModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-bookmark me-2"></i>Reserve Parcel</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="reserveInfo"></p>
+        <div class="mb-2"><label class="form-label">Pieces *</label><input class="form-control" id="rsvPieces" type="number" min="1" /></div>
+        <div class="mb-2"><label class="form-label">Weight (ct)</label><input class="form-control" id="rsvWeight" type="number" step="0.0001" /></div>
+        <div class="mb-2"><label class="form-label">Order / Job Reference</label><input class="form-control" id="rsvOrder" /></div>
+        <div class="mb-2"><label class="form-label">Customer</label><input class="form-control" id="rsvCustomer" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="rsvNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="doReserve()">Reserve</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Regrade Modal -->
+<div class="modal fade" id="regradeModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-layers me-2"></i>Regrade / Resort Parcel</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <p class="small text-muted" id="regradeInfo"></p>
+        <p class="small">Input weight must equal output weight + process loss + unexplained variance (within tolerance).</p>
+        <div id="regradeRows"></div>
+        <button class="btn btn-sm btn-outline-secondary mt-2" onclick="addRegradeRow()"><i class="bi bi-plus me-1"></i>Add Grade</button>
+        <div class="row g-2 mt-3">
+          <div class="col-md-3"><label class="form-label small">Process Loss (pcs)</label><input class="form-control form-control-sm" id="rgLossPcs" type="number" value="0" /></div>
+          <div class="col-md-3"><label class="form-label small">Process Loss (ct)</label><input class="form-control form-control-sm" id="rgLossWt" type="number" step="0.0001" value="0" /></div>
+          <div class="col-md-3"><label class="form-label small">Tolerance (ct)</label><input class="form-control form-control-sm" id="rgTol" type="number" step="0.0001" value="0.02" /></div>
+          <div class="col-md-3"><label class="form-label small">Approved By</label><input class="form-control form-control-sm" id="rgApprover" /></div>
+        </div>
+        <div class="mt-2"><label class="form-label small">Notes</label><textarea class="form-control form-control-sm" id="rgNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="doRegrade()">Execute Regrade</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Quarantine Release Modal -->
+<div class="modal fade" id="releaseModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="bi bi-shield-check me-2"></i>Release from Quarantine</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-2">
+          <label class="form-label">Resolved Origin *</label>
+          <select class="form-select" id="relOrigin">
+            <option value="natural">Natural</option>
+            <option value="lab_grown">Lab-Grown</option>
+            <option value="simulant">Simulant</option>
+          </select>
+        </div>
+        <div class="mb-2"><label class="form-label">Material (optional)</label><input class="form-control" id="relMaterial" placeholder="natural_diamond" /></div>
+        <div class="mb-2">
+          <label class="form-label">Screening Status</label>
+          <select class="form-select" id="relScreen">
+            <option value="screened">Screened</option>
+            <option value="certified">Certified</option>
+          </select>
+        </div>
+        <div class="mb-2"><label class="form-label">Approved By *</label><input class="form-control" id="relApprover" /></div>
+        <div class="mb-2"><label class="form-label">Notes</label><textarea class="form-control" id="relNotes" rows="2"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-success" onclick="doRelease()">Release</button>
         <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
       </div>
     </div>

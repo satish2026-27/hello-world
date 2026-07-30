@@ -259,4 +259,20 @@ function initSchema() {
   `);
 }
 
-module.exports = { getDb, initDb };
+async function reloadDb() {
+  if (!SQL) SQL = await initSqlJs();
+  if (fs.existsSync(DB_PATH)) {
+    const buf = fs.readFileSync(DB_PATH);
+    if (_db) _db.close();
+    _db = new SQL.Database(buf);
+  } else {
+    if (_db) _db.close();
+    _db = new SQL.Database();
+    initSchema();
+    saveDb();
+  }
+  _db.run('PRAGMA foreign_keys = ON');
+  return _db;
+}
+
+module.exports = { getDb, initDb, reloadDb };

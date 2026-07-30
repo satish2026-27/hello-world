@@ -11,6 +11,7 @@ function showView(name, parcelId) {
   if (name === 'detail' && parcelId) loadDetail(parcelId);
   if (name === 'uat')       renderUAT();
   if (name === 'receive')   populateMaterialDropdowns();
+  if (name === 'disposition' && parcelId) loadDisposition(parcelId);
 }
 
 /* ── API helpers ─────────────────────────────────────────────────────────── */
@@ -168,7 +169,16 @@ async function loadDetail(id) {
                 <button class="btn btn-sm btn-outline-primary" onclick="openIssue('${p.id}')"><i class="bi bi-tools me-1"></i>Issue</button>
                 ${p.wip_pieces > 0 ? `<button class="btn btn-sm btn-outline-success" onclick="openReturn('${p.id}')"><i class="bi bi-arrow-return-left me-1"></i>Return</button>` : ''}
                 <button class="btn btn-sm btn-outline-secondary" onclick="openMemo('${p.id}')"><i class="bi bi-envelope me-1"></i>Memo</button>
-                <button class="btn btn-sm btn-outline-danger"    onclick="openAdjust('${p.id}')"><i class="bi bi-calculator me-1"></i>Adjust</button>
+                ${p.memo_pieces > 0 ? `<button class="btn btn-sm btn-outline-success" onclick="openMemoReturn('${p.id}')"><i class="bi bi-envelope-open me-1"></i>Memo Return</button>` : ''}
+                <button class="btn btn-sm btn-outline-success" onclick="openSale('${p.id}')"><i class="bi bi-receipt me-1"></i>Sale</button>
+                <button class="btn btn-sm btn-outline-primary" onclick="openReserve('${p.id}')"><i class="bi bi-bookmark me-1"></i>Reserve</button>
+                ${p.reserved_pieces > 0 ? `<button class="btn btn-sm btn-outline-secondary" onclick="doUnreserve('${p.id}')"><i class="bi bi-bookmark-x me-1"></i>Unreserve</button>` : ''}
+                <button class="btn btn-sm btn-outline-dark" onclick="openRegrade('${p.id}')"><i class="bi bi-layers me-1"></i>Regrade</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="openAdjust('${p.id}')"><i class="bi bi-calculator me-1"></i>Adjust</button>
+                ${p.lifecycle_stage === 'quarantined'
+                  ? `<button class="btn btn-sm btn-success" onclick="openRelease('${p.id}')"><i class="bi bi-shield-check me-1"></i>Release QC</button>`
+                  : `<button class="btn btn-sm btn-outline-danger" onclick="doQuarantine('${p.id}')"><i class="bi bi-exclamation-triangle me-1"></i>Quarantine</button>`}
+                <button class="btn btn-sm btn-outline-dark" onclick="showView('disposition','${p.id}')"><i class="bi bi-diagram-3 me-1"></i>Disposition</button>
               </div>
             </div>
 
@@ -394,9 +404,12 @@ async function doSplit() {
 
   if (!splits.length) { toast('Add at least one split with pieces > 0', 'warning'); return; }
   try {
-    const r = await api(`/api/parcels/${splitParcelId}/split`, 'POST', { splits });
+    const r = await api(`/api/parcels/${splitParcelId}/split`, 'POST', {
+      splits,
+      allocation_method: document.getElementById('splitAllocMethod')?.value || 'proportional_weight',
+    });
     bootstrap.Modal.getInstance(document.getElementById('splitModal')).hide();
-    toast(`Split created ${r.children.length} child parcel(s)`, 'success');
+    toast(`Split created ${r.children.length} child parcel(s)${r.parent_closed ? ' · parent closed' : ''}`, 'success');
     loadDetail(splitParcelId);
     showView('detail', splitParcelId);
   } catch(err) { toast(err.message, 'danger'); }
@@ -479,18 +492,21 @@ async function openReturn(id) {
   returnParcelId = id;
   const p = await api('/api/parcels/' + id);
   document.getElementById('returnInfo').innerHTML = `<strong>${p.parcel_number}</strong> · WIP: ${fmt(p.wip_pieces,0)} pcs / ${fmt(p.wip_weight_ct,4)} ct`;
-  ['retPieces','retWeight','retBroken','retLost','retWO','retNotes'].forEach(x => document.getElementById(x).value = x.includes('Broken')||x.includes('Lost') ? '0' : '');
+  ['retPieces','retWeight','retBroken','retLost','retConsumed','retWO','retNotes'].forEach(x => {
+    document.getElementById(x).value = /Broken|Lost|Consumed/.test(x) ? '0' : '';
+  });
   new bootstrap.Modal(document.getElementById('returnModal')).show();
 }
 async function doReturn() {
   try {
     const r = await api(`/api/parcels/${returnParcelId}/return`, 'POST', {
-      pieces:       +document.getElementById('retPieces').value  || 0,
-      weight_ct:    +document.getElementById('retWeight').value  || 0,
-      broken_pieces:+document.getElementById('retBroken').value  || 0,
-      lost_pieces:  +document.getElementById('retLost').value    || 0,
-      work_order:   document.getElementById('retWO').value,
-      notes:        document.getElementById('retNotes').value,
+      pieces:          +document.getElementById('retPieces').value  || 0,
+      weight_ct:       +document.getElementById('retWeight').value  || 0,
+      broken_pieces:   +document.getElementById('retBroken').value  || 0,
+      lost_pieces:     +document.getElementById('retLost').value    || 0,
+      consumed_pieces: +document.getElementById('retConsumed').value|| 0,
+      work_order:      document.getElementById('retWO').value,
+      notes:           document.getElementById('retNotes').value,
     });
     bootstrap.Modal.getInstance(document.getElementById('returnModal')).hide();
     toast(`Return recorded: ${r.returned} returned, ${r.broken} broken, ${r.lost} lost, ${r.consumed} consumed`, 'success');
@@ -548,158 +564,445 @@ async function doAdjust() {
   } catch(err) { toast(err.message, 'danger'); }
 }
 
+/* ── Memo Return / Sale / Reserve / Regrade / Quarantine ────────────────── */
+let memoReturnParcelId = null;
+async function openMemoReturn(id) {
+  memoReturnParcelId = id;
+  const p = await api('/api/parcels/' + id);
+  document.getElementById('memoReturnInfo').innerHTML =
+    `<strong>${p.parcel_number}</strong> · On memo: ${fmt(p.memo_pieces,0)} pcs / ${fmt(p.memo_weight_ct,4)} ct`;
+  ['mrPieces','mrWeight','mrRef','mrNotes'].forEach(x => document.getElementById(x).value = '');
+  new bootstrap.Modal(document.getElementById('memoReturnModal')).show();
+}
+async function doMemoReturn() {
+  try {
+    await api(`/api/parcels/${memoReturnParcelId}/memo-return`, 'POST', {
+      pieces: +document.getElementById('mrPieces').value,
+      weight_ct: +document.getElementById('mrWeight').value || 0,
+      memo_ref: document.getElementById('mrRef').value,
+      notes: document.getElementById('mrNotes').value,
+    });
+    bootstrap.Modal.getInstance(document.getElementById('memoReturnModal')).hide();
+    toast('Memo return recorded', 'success');
+    loadDetail(memoReturnParcelId);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
+let saleParcelId = null;
+async function openSale(id) {
+  saleParcelId = id;
+  const p = await api('/api/parcels/' + id);
+  document.getElementById('saleInfo').innerHTML =
+    `<strong>${p.parcel_number}</strong> · Available: ${fmt(p.available.pieces,0)} pcs / ${fmt(p.available.weight,4)} ct`;
+  ['salePieces','saleWeight','saleCustomer','saleRef','saleNotes'].forEach(x => document.getElementById(x).value = '');
+  new bootstrap.Modal(document.getElementById('saleModal')).show();
+}
+async function doSale() {
+  try {
+    const r = await api(`/api/parcels/${saleParcelId}/sale`, 'POST', {
+      pieces: +document.getElementById('salePieces').value,
+      weight_ct: +document.getElementById('saleWeight').value || 0,
+      customer: document.getElementById('saleCustomer').value,
+      sales_ref: document.getElementById('saleRef').value,
+      notes: document.getElementById('saleNotes').value,
+    });
+    bootstrap.Modal.getInstance(document.getElementById('saleModal')).hide();
+    toast(`Sale recorded · COGS ${fmtUSD(r.cost_cogs)}${r.closed ? ' · parcel closed' : ''}`, 'success');
+    loadDetail(saleParcelId);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
+let reserveParcelId = null;
+async function openReserve(id) {
+  reserveParcelId = id;
+  const p = await api('/api/parcels/' + id);
+  document.getElementById('reserveInfo').innerHTML =
+    `<strong>${p.parcel_number}</strong> · Available: ${fmt(p.available.pieces,0)} pcs / ${fmt(p.available.weight,4)} ct`;
+  ['rsvPieces','rsvWeight','rsvOrder','rsvCustomer','rsvNotes'].forEach(x => document.getElementById(x).value = '');
+  new bootstrap.Modal(document.getElementById('reserveModal')).show();
+}
+async function doReserve() {
+  try {
+    await api(`/api/parcels/${reserveParcelId}/reserve`, 'POST', {
+      pieces: +document.getElementById('rsvPieces').value,
+      weight_ct: +document.getElementById('rsvWeight').value || 0,
+      order_reference: document.getElementById('rsvOrder').value,
+      customer: document.getElementById('rsvCustomer').value,
+      notes: document.getElementById('rsvNotes').value,
+    });
+    bootstrap.Modal.getInstance(document.getElementById('reserveModal')).hide();
+    toast('Reservation recorded', 'success');
+    loadDetail(reserveParcelId);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+async function doUnreserve(id) {
+  try {
+    await api(`/api/parcels/${id}/unreserve`, 'POST', {});
+    toast('Reservation released', 'success');
+    loadDetail(id);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
+let regradeParcelId = null;
+async function openRegrade(id) {
+  regradeParcelId = id;
+  const p = await api('/api/parcels/' + id);
+  document.getElementById('regradeInfo').innerHTML =
+    `Source: <strong>${p.parcel_number}</strong> — ${fmt(p.current_pieces,0)} pcs / ${fmt(p.current_weight_ct,4)} ct · ${fmtUSD(p.current_avg_cost)}`;
+  document.getElementById('regradeRows').innerHTML = '';
+  addRegradeRow();
+  addRegradeRow();
+  document.getElementById('rgLossPcs').value = '0';
+  document.getElementById('rgLossWt').value = '0';
+  document.getElementById('rgTol').value = '0.02';
+  document.getElementById('rgApprover').value = '';
+  document.getElementById('rgNotes').value = '';
+  new bootstrap.Modal(document.getElementById('regradeModal')).show();
+}
+function addRegradeRow() {
+  const idx = document.querySelectorAll('.regrade-row').length;
+  const div = document.createElement('div');
+  div.className = 'regrade-row row g-2 mb-2 align-items-end';
+  div.innerHTML = `
+    <div class="col-2"><label class="form-label small">Grade</label><input class="form-control form-control-sm" name="rg_grade_${idx}" placeholder="premium" /></div>
+    <div class="col-2"><label class="form-label small">Pieces</label><input class="form-control form-control-sm" name="rg_pieces_${idx}" type="number" min="0" /></div>
+    <div class="col-2"><label class="form-label small">Weight (ct)</label><input class="form-control form-control-sm" name="rg_weight_${idx}" type="number" step="0.0001" /></div>
+    <div class="col-2"><label class="form-label small">Color</label><input class="form-control form-control-sm" name="rg_color_${idx}" /></div>
+    <div class="col-2"><label class="form-label small">Clarity</label><input class="form-control form-control-sm" name="rg_clarity_${idx}" /></div>
+    <div class="col-1"><button class="btn btn-sm btn-outline-danger" onclick="this.closest('.regrade-row').remove()"><i class="bi bi-trash"></i></button></div>`;
+  document.getElementById('regradeRows').appendChild(div);
+}
+async function doRegrade() {
+  const rows = document.querySelectorAll('.regrade-row');
+  const outputs = Array.from(rows).map((r, i) => ({
+    assortment_grade: r.querySelector(`[name="rg_grade_${i}"]`)?.value || 'regraded',
+    pieces: +r.querySelector(`[name="rg_pieces_${i}"]`)?.value || 0,
+    weight_ct: +r.querySelector(`[name="rg_weight_${i}"]`)?.value || 0,
+    color: r.querySelector(`[name="rg_color_${i}"]`)?.value || null,
+    clarity: r.querySelector(`[name="rg_clarity_${i}"]`)?.value || null,
+  })).filter(o => o.pieces > 0 || o.weight_ct > 0);
+  if (!outputs.length) { toast('Add at least one output grade', 'warning'); return; }
+  try {
+    const r = await api(`/api/parcels/${regradeParcelId}/regrade`, 'POST', {
+      outputs,
+      process_loss_pieces: +document.getElementById('rgLossPcs').value || 0,
+      process_loss_weight_ct: +document.getElementById('rgLossWt').value || 0,
+      tolerance_ct: +document.getElementById('rgTol').value || 0.02,
+      approved_by: document.getElementById('rgApprover').value || null,
+      notes: document.getElementById('rgNotes').value,
+    });
+    bootstrap.Modal.getInstance(document.getElementById('regradeModal')).hide();
+    toast(`Regrade created ${r.children.length} grade parcel(s)`, 'success');
+    if (r.children[0]) showView('detail', r.children[0].id);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
+async function doQuarantine(id) {
+  const reason = prompt('Quarantine reason:', 'Identity / quality investigation');
+  if (reason == null) return;
+  try {
+    await api(`/api/parcels/${id}/quarantine`, 'POST', { reason });
+    toast('Parcel quarantined', 'warning');
+    loadDetail(id);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
+let releaseParcelId = null;
+function openRelease(id) {
+  releaseParcelId = id;
+  document.getElementById('relApprover').value = '';
+  document.getElementById('relNotes').value = '';
+  document.getElementById('relMaterial').value = '';
+  new bootstrap.Modal(document.getElementById('releaseModal')).show();
+}
+async function doRelease() {
+  try {
+    await api(`/api/parcels/${releaseParcelId}/release-quarantine`, 'POST', {
+      material_origin: document.getElementById('relOrigin').value,
+      material: document.getElementById('relMaterial').value || null,
+      screening_status: document.getElementById('relScreen').value,
+      approved_by: document.getElementById('relApprover').value,
+      notes: document.getElementById('relNotes').value,
+    });
+    bootstrap.Modal.getInstance(document.getElementById('releaseModal')).hide();
+    toast('Released from quarantine', 'success');
+    loadDetail(releaseParcelId);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
+async function loadDisposition(id) {
+  currentParcelId = id;
+  const d = await api('/api/parcels/' + id + '/disposition');
+  const s = d.summary;
+  document.getElementById('dispositionContent').innerHTML = `
+    <h4 class="mb-3"><i class="bi bi-diagram-3 me-2 text-warning"></i>Disposition Audit — ${d.root.parcel_number}</h4>
+    <div class="row g-3 mb-3">
+      <div class="col-md-3"><div class="card stat-card p-3"><div class="stat-value">${fmt(s.original_pieces,0)}</div><div class="stat-label">Original Pcs</div></div></div>
+      <div class="col-md-3"><div class="card stat-card p-3"><div class="stat-value">${fmt(s.original_weight_ct,2)}</div><div class="stat-label">Original Ct</div></div></div>
+      <div class="col-md-3"><div class="card stat-card p-3"><div class="stat-value text-success">${fmt(s.remaining_pieces,0)}</div><div class="stat-label">Remaining Pcs</div></div></div>
+      <div class="col-md-3"><div class="card stat-card p-3"><div class="stat-value">${fmtUSD(s.remaining_value)}</div><div class="stat-label">Remaining Value</div></div></div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-header fw-semibold">Family Parcels (${d.family.length})</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead class="table-dark"><tr><th>Parcel #</th><th>Status</th><th>Stage</th><th>Pcs</th><th>Wt</th><th>Value</th><th>Location</th><th>Owner</th></tr></thead>
+          <tbody>
+            ${d.family.map(f => `<tr>
+              <td><a href="#" onclick="showView('detail','${f.id}');return false">${f.parcel_number}</a></td>
+              <td>${f.status}</td><td>${stageBadge(f.lifecycle_stage)}</td>
+              <td class="text-end">${fmt(f.current_pieces,0)}</td>
+              <td class="text-end">${fmt(f.current_weight_ct,4)}</td>
+              <td class="text-end">${fmtUSD(f.current_avg_cost)}</td>
+              <td><small>${[f.site,f.vault].filter(Boolean).join(' › ')}</small></td>
+              <td>${f.owner || '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header fw-semibold">Family Ledger (${d.transactions.length})</div>
+      <div class="card-body p-0 table-responsive">
+        <table class="table table-sm mb-0">
+          <thead class="table-light"><tr><th>Date</th><th>Parcel</th><th>Type</th><th>Δ Pcs</th><th>Δ Wt</th><th>Notes</th></tr></thead>
+          <tbody>
+            ${d.transactions.map(t => `<tr>
+              <td>${t.physical_date}</td>
+              <td>${t.parcel_number}</td>
+              <td>${txnChip(t.transaction_type)}</td>
+              <td class="text-end ${t.pieces_delta < 0 ? 'text-danger' : 'text-success'}">${t.pieces_delta > 0 ? '+' : ''}${fmt(t.pieces_delta,0)}</td>
+              <td class="text-end">${t.weight_delta_ct > 0 ? '+' : ''}${fmt(t.weight_delta_ct,4)}</td>
+              <td><small>${t.notes || ''}</small></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function resetUat() {
+  if (!confirm('Reset all parcel data to the seed baseline? Unsaved UAT manipulations will be lost.')) return;
+  try {
+    await api('/api/uat/reset', 'POST', {});
+    toast('UAT data reset to seed baseline', 'success');
+    showView('dashboard');
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
 /* ── UAT Scenarios ──────────────────────────────────────────────────────── */
 const UAT_SCENARIOS = [
   {
-    id: 'UAT-01',
+    id: 'UAT-01', area: 'Receipt',
     title: 'Receive a new natural diamond parcel',
-    objective: 'Verify the system correctly creates a new parcel with all required fields and logs a receipt transaction.',
+    objective: 'Create a parcel with required fields and an immutable receipt transaction.',
     steps: [
-      'Click "Receive" in the navigation bar.',
-      'Fill in: Parcel # = DP-TEST-001, Material = natural_diamond, Origin = natural, Shape = Round Brilliant, Size = 2.0–2.2 mm, Color = G, Clarity = SI1, Pieces = 100, Weight = 3.500 ct, Purchase Rate = 600 (per carat), Vault = Vault A, Custodian = Alice Chen.',
-      'Click "Receive Parcel".',
-      'Verify the system redirects to the parcel detail page.',
+      'Click Reset Data if needed, then Receive.',
+      'Enter Parcel # DP-TEST-001, material natural_diamond, origin natural, shape Round Brilliant, size 2.0–2.2 mm, color G–H, clarity SI1–SI2, 100 pcs, 3.500 ct, rate 600/ct, Vault A, custodian Alice Chen.',
+      'Submit and open the ledger.',
     ],
-    expected: 'Parcel DP-TEST-001 is created with status "available". The Transaction Ledger shows one "receipt" entry with pieces_delta = +100 and weight_delta = +3.5000 ct.',
+    expected: 'Parcel available with 100 pcs / 3.5000 ct. Receipt txn pieces_delta=+100. Landed cost = $2,100.',
   },
   {
-    id: 'UAT-02',
+    id: 'UAT-02', area: 'Split',
     title: 'Split a parcel into two children',
-    objective: 'Verify the split operation correctly reduces the parent balance and creates child parcels with proportional cost allocation.',
+    objective: 'Parent balance reduces; children inherit genealogy and proportional cost.',
     steps: [
-      'Open parcel DP-000184 from the Parcel list.',
-      'Click "Split".',
-      'Add Split 1: 150 pcs, 5.2700 ct, Bin = Retail-Tray-A.',
-      'Add Split 2: 100 pcs, 3.5200 ct, Bin = Retail-Tray-B.',
-      'Click "Execute Split".',
+      'Open DP-000184 (seed balance 325 pcs / 11.40 ct).',
+      'Split: 150 pcs / 5.27 ct and 100 pcs / 3.52 ct.',
+      'Confirm parent, children, and genealogy.',
     ],
-    expected: 'Two child parcels created. Parent DP-000184 balance reduces by 250 pcs and 8.79 ct. Each child parcel has a "split" relationship to the parent. Transaction ledger shows a "split" entry on the parent and "opening_balance" on each child.',
+    expected: 'Parent reduced by 250 pcs / 8.79 ct. Two children with opening_balance txns. Genealogy links both children to DP-000184.',
   },
   {
-    id: 'UAT-03',
-    title: 'Merge two compatible parcels',
-    objective: 'Verify two same-origin parcels can be merged and that the merge is rejected for mixed natural/lab-grown goods.',
+    id: 'UAT-03', area: 'Merge',
+    title: 'Merge compatible parcels; reject natural + lab-grown',
+    objective: 'Merge rules enforce ownership, origin, treatment, and open balances.',
     steps: [
-      'From the Parcel List, click the Merge button (or open merge modal via any parcel).',
-      'Select DP-000184-A and any other available natural_diamond parcel.',
-      'Enter new parcel number MERGE-TEST-001.',
-      'Click "Execute Merge".',
-      'Then attempt to merge a natural_diamond parcel with a lab_diamond parcel (DP-000211).',
+      'Use Merge: select two available natural parcels with no memo/WIP/reserve.',
+      'Then attempt DP-000184 (or child) with DP-000211 (lab-grown).',
     ],
-    expected: 'First merge succeeds: new parcel MERGE-TEST-001 is created, source parcels are marked "merged/closed". Second merge is rejected with error "Cannot merge natural and lab-grown material".',
+    expected: 'Compatible merge creates a new parcel and closes sources. Natural+lab merge rejected with "Cannot merge natural and lab-grown material".',
   },
   {
-    id: 'UAT-04',
-    title: 'Issue stones to manufacturing and return with breakage',
-    objective: 'Verify WIP tracking, breakage recording, and correct balance after partial return.',
+    id: 'UAT-04', area: 'Production',
+    title: 'Manufacturing issue and partial return with breakage',
+    objective: 'WIP, broken, lost, and consumed are distinct ledger outcomes.',
     steps: [
-      'Open parcel DP-000211 (lab diamond).',
-      'Click "Issue to Manufacturing": 50 pcs, 1.4000 ct, WO = WO-UAT-001.',
-      'Verify: wip_pieces increases to 130 (existing 80 + 50).',
-      'Click "Return": Returned = 45 pcs, Weight = 1.2600 ct, Broken = 3 pcs, Lost = 2 pcs, WO = WO-UAT-001.',
+      'Open DP-000211 → Issue 50 pcs / 1.4000 ct to WO-UAT-001.',
+      'Return: 45 returned, 3 broken, 2 lost.',
     ],
-    expected: 'After return: WIP decreases by 50. Current pieces decreases by consumed (0) + broken (3) + lost (2) = 5 pcs. damaged_pieces increases by 3. Transaction ledger shows manufacturing_issue and manufacturing_return entries.',
+    expected: 'WIP +50 then −50. damaged_pieces +3. Ledger shows manufacturing_issue and manufacturing_return.',
   },
   {
-    id: 'UAT-05',
-    title: 'Issue emerald on memo and return partial',
-    objective: 'Verify memo lifecycle: issue reduces available, partial return is recorded, memo balance correctly maintained.',
+    id: 'UAT-05', area: 'Memo',
+    title: 'Memo issue and partial return',
+    objective: 'Memo reduces available without changing ownership.',
     steps: [
-      'Open parcel EM-000031 (emerald).',
-      'Click "Memo": 2 pcs, ~4.80 ct, Customer = Test Jewelers, Memo Ref = MEMO-UAT-001.',
-      'Navigate to the parcel detail: verify memo_pieces = 4 (existing 2 + 2) and available decreases.',
-      'Return from memo: on detail page, verify the option to record memo return is available.',
+      'Open EM-000031 → Memo 2 pcs / 4.80 ct to Test Jewelers.',
+      'Use Memo Return for 1 pc.',
     ],
-    expected: 'Memo issue is recorded; memo_pieces increases. Available pieces decreases accordingly. A memo_issue transaction appears in the ledger with custodian_to = "Test Jewelers".',
+    expected: 'memo_pieces rises then partially falls. Available adjusts. Ledger has memo_issue and memo_return.',
   },
   {
-    id: 'UAT-06',
+    id: 'UAT-06', area: 'Transfer',
     title: 'Transfer parcel between vaults',
-    objective: 'Verify physical relocation is recorded without changing piece count or weight.',
+    objective: 'Relocation is quantity-neutral.',
     steps: [
-      'Open any available parcel.',
-      'Click "Transfer".',
-      'Enter new Site = "Retail Store 2", Vault = "Store Safe 2", Bin = "Tray-05", Custodian = "Eve Jones", Reason = "Branch transfer".',
-      'Click Transfer.',
+      'Open any available parcel → Transfer to Retail Store 2 / Store Safe 2 / Tray-05 / Eve Jones.',
     ],
-    expected: 'Parcel location fields update. Transaction ledger shows a "transfer" entry with location_from and location_to fields, pieces_delta = 0 and weight_delta_ct = 0.',
+    expected: 'Location updates. Transfer txn has pieces_delta=0 and weight_delta_ct=0.',
   },
   {
-    id: 'UAT-07',
-    title: 'Physical count adjustment with approval',
-    objective: 'Verify count adjustment creates an auditable correction entry.',
+    id: 'UAT-07', area: 'Count',
+    title: 'Physical count adjustment with maker-checker approval',
+    objective: 'Count corrections require approved_by and preserve before-values.',
     steps: [
-      'Open parcel DP-000184.',
-      'Click "Adjust".',
-      'Change new piece count to current_pieces - 5 (simulating a shortage).',
-      'Enter Reason = "Physical count shortage", Approved By = "Manager A", Notes = "5 stones unaccounted after blind count".',
-      'Click "Record Adjustment".',
+      'Open DP-000184 → Adjust pieces down by 5 with Approved By = Manager A.',
+      'Retry once without Approved By — expect rejection.',
     ],
-    expected: 'current_pieces decreases by 5. Transaction ledger shows a "count_correction" entry with pieces_delta = -5, approved_by = "Manager A". The original quantity is preserved in the "before_pieces" field.',
+    expected: 'Approved adjust logs count_correction with before_pieces preserved. Missing approver returns 400.',
   },
   {
-    id: 'UAT-08',
-    title: 'Verify natural/lab-grown quarantine parcel',
-    objective: 'Verify that a quarantined parcel is visible with correct status and cannot be issued.',
+    id: 'UAT-08', area: 'Quarantine',
+    title: 'Quarantined parcel blocks production issue',
+    objective: 'Unknown-identity goods cannot enter manufacturing.',
     steps: [
-      'Open parcel QR-000003 from the Parcel List (filter by lifecycle_stage = quarantined).',
-      'Note the lifecycle_stage = "quarantined" and screening_status = "pending".',
-      'Attempt to issue from this parcel.',
+      'Filter lifecycle = quarantined → open QR-000003.',
+      'Attempt Issue to manufacturing.',
+      'Release QC with origin natural and approver, then confirm available.',
     ],
-    expected: 'Parcel is visible with "quarantined" badge. The issue operation should reflect the quarantined status. Notes confirm identity is unknown pending GIA screening.',
+    expected: 'Issue rejected while quarantined. After release, lifecycle=available and origin resolved.',
   },
   {
-    id: 'UAT-09',
-    title: 'Verify vendor memo/consignment visibility',
-    objective: 'Verify vendor-memo goods are clearly flagged as non-company-owned and show correct owner.',
+    id: 'UAT-09', area: 'Ownership',
+    title: 'Vendor memo / consignment ownership',
+    objective: 'Ownership and custody are separate; vendor goods are not company cost.',
     steps: [
-      'Open parcel PD-000009 (pink diamonds on vendor memo).',
-      'Check the Owner field and lifecycle_stage.',
-      'Verify all 5 pieces are counted in memo_pieces, not in available balance.',
+      'Open PD-000009. Confirm Owner=Vendor, memo_pieces=5, available=0, landed_cost=$0.',
     ],
-    expected: 'Owner = "Vendor", lifecycle_stage = "on_memo", memo_pieces = 5, available pieces = 0. Notes clearly state the vendor memo terms.',
+    expected: 'Vendor-owned consignment is visible in vault but not company inventory value.',
   },
   {
-    id: 'UAT-10',
-    title: 'Parcel genealogy trace',
-    objective: 'Verify the genealogy tree correctly shows the full family from root to child parcels.',
+    id: 'UAT-10', area: 'Genealogy',
+    title: 'Parcel genealogy and disposition audit',
+    objective: 'Trace every carat from root purchase to current children.',
     steps: [
-      'Open parcel DP-000184-A (a child of DP-000184).',
-      'Scroll to the "Parcel Genealogy" section at the bottom of the detail page.',
+      'Open DP-000184-A → Genealogy section.',
+      'Click Disposition on DP-000184 and review family summary.',
     ],
-    expected: 'Genealogy tree shows DP-000184 as root with DP-000184-A as a child split. Clicking DP-000184 in the tree navigates to the parent parcel detail.',
+    expected: 'Tree shows root and split child. Disposition reports original 525 pcs and remaining family balances.',
   },
   {
-    id: 'UAT-11',
-    title: 'Immutable ledger: verify no transaction can be deleted',
-    objective: 'Confirm the transaction ledger is append-only and historical records cannot be modified.',
+    id: 'UAT-11', area: 'Audit',
+    title: 'Immutable ledger — no transaction deletion',
+    objective: 'Ledger is append-only.',
     steps: [
-      'Open any parcel with multiple transactions.',
-      'Examine the Transaction Ledger: verify all past entries are read-only.',
-      'Attempt to call DELETE /api/parcels/{id}/transactions (via browser developer tools or REST client).',
+      'Open any parcel ledger — confirm no edit/delete controls.',
+      'DELETE /api/parcels/{id}/transactions via DevTools.',
     ],
-    expected: 'No delete or edit controls appear for past transactions in the UI. The API does not expose any DELETE endpoint for transactions.',
+    expected: 'UI is read-only. API returns 404/405.',
   },
   {
-    id: 'UAT-12',
-    title: 'Pearl parcel: per-piece pricing and zero weight',
-    objective: 'Verify that parcels priced per-piece with no carat weight are handled correctly.',
+    id: 'UAT-12', area: 'Valuation',
+    title: 'Pearl parcel: per-piece pricing, zero weight',
+    objective: 'Pieces and weight are independent units.',
     steps: [
-      'Open parcel PL-000018 (Akoya pearls).',
-      'Verify: pricing_unit = "per_piece", original_weight_ct = 0, landed_cost = 9000.',
-      'Issue 10 pieces to manufacturing.',
+      'Open PL-000018. Confirm per_piece pricing and 0 ct.',
+      'Issue 10 pcs at weight 0.',
     ],
-    expected: 'Pearl parcel is displayed correctly with 0 carat weight. Issue of 10 pcs succeeds. Landed cost per piece = $45 is implicit from total ÷ pieces.',
+    expected: 'No division-by-zero. Issue succeeds with weight_delta_ct=0.',
+  },
+  {
+    id: 'UAT-13', area: 'Data Integrity',
+    title: 'Dual-unit discrepancy — pieces change, weight holds',
+    objective: 'Never derive weight from pieces automatically.',
+    steps: [
+      'Receive 10 pcs / 3.0000 ct.',
+      'Adjust pieces to 9 without changing weight (Approved By required).',
+    ],
+    expected: 'current_pieces=9, current_weight_ct still 3.0000. pieces_delta=-1, weight_delta_ct=0.',
+  },
+  {
+    id: 'UAT-14', area: 'Compliance',
+    title: 'Natural / lab-grown contamination rejection',
+    objective: 'Identity separation is non-negotiable on merge.',
+    steps: [
+      'Attempt Merge of any natural_diamond with DP-000211.',
+    ],
+    expected: 'Rejected with natural/lab-grown error. No balances change.',
+  },
+  {
+    id: 'UAT-15', area: 'Reporting',
+    title: 'Dashboard portfolio value accuracy',
+    objective: 'Dashboard totals match active parcel balances.',
+    steps: [
+      'Reset Data. Open Dashboard. Sum current_avg_cost / pieces / weight from Parcel List.',
+    ],
+    expected: 'Portfolio Value, Total Pieces, and Total Weight match the active parcel sums.',
+  },
+  {
+    id: 'UAT-16', area: 'Regrade',
+    title: 'Regrade mixed parcel into quality grades',
+    objective: 'Input = outputs + process loss + unexplained variance.',
+    steps: [
+      'Reset Data. Open DP-000184-A (200 pcs / 7.02 ct).',
+      'Regrade into Premium 120 pcs / 4.20 ct and Commercial 80 pcs / 2.80 ct.',
+      'Confirm parent closed and children created.',
+    ],
+    expected: 'Source closed at zero. Two regrade children. Ledger regrade entry records the sort.',
+  },
+  {
+    id: 'UAT-17', area: 'Reservation',
+    title: 'Reserve and unreserve for an order',
+    objective: 'Reservations reduce available without consuming stock.',
+    steps: [
+      'Open SP-000072 → Reserve 6 pcs (already has 6 reserved in seed — use DP-000184 instead for 20 pcs).',
+      'Confirm available drops. Unreserve and confirm available restores.',
+    ],
+    expected: 'reserved_pieces moves; available = current − reserved − memo − wip. Unreserve releases balance.',
+  },
+  {
+    id: 'UAT-18', area: 'Sale',
+    title: 'Sale reduces inventory and can close parcel',
+    objective: 'Sale posts COGS from average cost and closes at zero.',
+    steps: [
+      'Receive a small test parcel (e.g. 10 pcs / 1 ct).',
+      'Sell all 10 pcs / 1 ct. Confirm parcel closed.',
+    ],
+    expected: 'Sale txn reduces pieces/weight/cost. Parcel status=closed when balance hits zero.',
   },
 ];
 
+const UAT_STORAGE_KEY = 'parcel_uat_results_v1';
+function loadUatResults() {
+  try { return JSON.parse(localStorage.getItem(UAT_STORAGE_KEY) || '{}'); } catch { return {}; }
+}
+function saveUatResults(map) {
+  localStorage.setItem(UAT_STORAGE_KEY, JSON.stringify(map));
+}
+
 function renderUAT() {
+  const uatResults = loadUatResults();
+  const colors = { pass:'success', fail:'danger', block:'warning' };
+  const labels = { pass:'PASSED', fail:'FAILED', block:'BLOCKED' };
+  const passed = Object.values(uatResults).filter(v => v === 'pass').length;
+  const failed = Object.values(uatResults).filter(v => v === 'fail').length;
+  const blocked = Object.values(uatResults).filter(v => v === 'block').length;
+  const scored = Object.keys(uatResults).length;
+  document.getElementById('uatScore').innerHTML =
+    `<span class="text-success">${passed} pass</span> · <span class="text-danger">${failed} fail</span> · <span class="text-warning">${blocked} blocked</span> · ${scored}/${UAT_SCENARIOS.length} scored`;
+
   document.getElementById('uatList').innerHTML = UAT_SCENARIOS.map(s => `
     <div class="card uat-scenario mb-3">
       <div class="card-body">
         <div class="d-flex align-items-start gap-3 flex-wrap">
           <div class="flex-grow-1">
-            <div class="fw-bold mb-1"><span class="badge bg-secondary me-2">${s.id}</span>${s.title}</div>
+            <div class="fw-bold mb-1">
+              <span class="badge bg-secondary me-2">${s.id}</span>
+              <span class="badge bg-dark me-2">${s.area}</span>
+              ${s.title}
+            </div>
             <div class="text-muted small mb-2"><em>${s.objective}</em></div>
             <div class="mb-2">
               ${s.steps.map((st, i) => `<div class="uat-step"><span class="badge bg-dark me-2">${i+1}</span>${st}</div>`).join('')}
@@ -708,29 +1011,32 @@ function renderUAT() {
           </div>
           <div class="uat-status text-end">
             <div class="btn-group-vertical gap-1" role="group">
-              <button class="btn btn-sm btn-success"  onclick="markUAT('${s.id}','pass',this)"><i class="bi bi-check2 me-1"></i>Pass</button>
-              <button class="btn btn-sm btn-danger"   onclick="markUAT('${s.id}','fail',this)"><i class="bi bi-x me-1"></i>Fail</button>
-              <button class="btn btn-sm btn-warning"  onclick="markUAT('${s.id}','block',this)"><i class="bi bi-exclamation me-1"></i>Blocked</button>
+              <button class="btn btn-sm btn-success"  onclick="markUAT('${s.id}','pass')"><i class="bi bi-check2 me-1"></i>Pass</button>
+              <button class="btn btn-sm btn-danger"   onclick="markUAT('${s.id}','fail')"><i class="bi bi-x me-1"></i>Fail</button>
+              <button class="btn btn-sm btn-warning"  onclick="markUAT('${s.id}','block')"><i class="bi bi-exclamation me-1"></i>Blocked</button>
             </div>
-            <div id="uat-result-${s.id}" class="mt-2 small fw-bold"></div>
+            <div id="uat-result-${s.id}" class="mt-2 small fw-bold">
+              ${uatResults[s.id] ? `<span class="text-${colors[uatResults[s.id]]}">${labels[uatResults[s.id]]}</span>` : ''}
+            </div>
           </div>
         </div>
       </div>
     </div>`).join('');
 }
 
-const uatResults = {};
-function markUAT(id, result, btn) {
+function markUAT(id, result) {
+  const uatResults = loadUatResults();
   uatResults[id] = result;
+  saveUatResults(uatResults);
   const colors = { pass:'success', fail:'danger', block:'warning' };
-  const labels = { pass:'✅ PASSED', fail:'❌ FAILED', block:'⚠️ BLOCKED' };
-  document.getElementById('uat-result-' + id).innerHTML =
-    `<span class="text-${colors[result]}">${labels[result]}</span>`;
-  const total  = UAT_SCENARIOS.length;
-  const passed = Object.values(uatResults).filter(v => v==='pass').length;
-  const failed = Object.values(uatResults).filter(v => v==='fail').length;
-  const score  = `${passed}/${total} passed`;
-  toast(`${score} — this scenario marked <strong>${result.toUpperCase()}</strong>`, colors[result]);
+  toast(`Scenario ${id} marked <strong>${result.toUpperCase()}</strong>`, colors[result]);
+  renderUAT();
+}
+
+function clearUatResults() {
+  localStorage.removeItem(UAT_STORAGE_KEY);
+  renderUAT();
+  toast('UAT results cleared', 'secondary');
 }
 
 /* ── Initialise ─────────────────────────────────────────────────────────── */

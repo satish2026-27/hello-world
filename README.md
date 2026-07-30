@@ -1,135 +1,124 @@
-# hello-world
+# Jewelry Parcel Management — UAT Environment
 
-This repository is for practicing the GitHub Flow
-i am satish kumar — done master's in the usf — loyal to all mighty
+A **User Acceptance Testing** environment for a jewelry ERP **Parcel Management** module.
 
----
+A parcel is a traceable, divisible inventory identity for commercially managed groups of loose stones — not merely a quantity field on an item. This UAT stack implements:
 
-# 💎 Jewelry Parcel Management — UAT Environment
-
-A full **User Acceptance Testing (UAT) environment** for a jewelry ERP **Parcel Management** module.
-
-Covers the complete lifecycle of loose-stone parcels: receipt, split, merge, transfer, manufacturing issue/return, memo/consignment, physical count, and compliance.
+> **One parcel identity + immutable ledger + genealogy graph + multiple balance dimensions.**
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
 npm install
-
-# 2. Seed sample data (diamonds, sapphires, emeralds, pearls, quarantine, vendor memo)
 npm run seed
-
-# 3. Start the UAT server
 npm start
-# → Open http://localhost:3000
+# → http://localhost:3000
+```
+
+Optional API smoke tests (server must be running):
+
+```bash
+npm run test:smoke
 ```
 
 ---
 
-## What's Included
+## Seeded Sample Parcels
 
-### Sample Parcels (seeded)
+| Parcel # | Material | Highlights |
+|----------|----------|------------|
+| DP-000184 | Natural diamond | Spec example after partial split — **325 pcs / 11.40 ct** remaining |
+| DP-000184-A | Natural diamond | Child split → Retail Store 1 |
+| DP-000211 | Lab-grown diamond | WIP + reserved balances |
+| SP-000072 | Blue sapphire | Heat-treated, Sri Lanka, reserved qty |
+| EM-000031 | Colombian emerald | Partial customer memo |
+| PD-000009 | Pink diamond | **Vendor memo** — Owner=Vendor, cost $0 |
+| PL-000018 | Akoya pearl | Per-piece pricing, **zero carat weight** |
+| QR-000003 | Unknown | **Quarantined** pending GIA screening |
 
-| Parcel # | Material | Description |
-|----------|----------|-------------|
-| DP-000184 | Natural Diamond | 525 pcs, G–H/SI, 18.42 ct @ $610/ct — the spec example |
-| DP-000184-A | Natural Diamond | Child split of DP-000184 — allocated to Retail Store 1 |
-| DP-000211 | Lab-Grown Diamond | 640 available + 80 WIP (tennis bracelet job) |
-| SP-000072 | Blue Sapphire | Sri Lanka, heat treated, oval, 62.40 ct |
-| EM-000031 | Colombian Emerald | 10 available + 2 on memo to NY Diamond District |
-| PD-000009 | Pink Diamond | Vendor memo/consignment — NOT company-owned |
-| PL-000018 | Akoya Pearl | 200 pcs, per-piece pricing, zero carat weight |
-| QR-000003 | Unknown | Quarantined — natural/lab-grown identity pending GIA |
+Use **Reset Data** in the UI (or `POST /api/uat/reset`) to restore this baseline between scenarios.
 
-### Business Operations Supported
+---
 
-| Operation | API Endpoint | UI Action |
-|-----------|-------------|-----------|
-| Receive parcel | `POST /api/parcels` | Receive button |
-| Split parcel | `POST /api/parcels/:id/split` | Scissors icon / Split modal |
-| Merge parcels | `POST /api/parcels/merge` | Merge modal |
-| Transfer location | `POST /api/parcels/:id/transfer` | Transfer modal |
-| Issue to manufacturing | `POST /api/parcels/:id/issue` | Issue button |
-| Manufacturing return | `POST /api/parcels/:id/return` | Return button |
-| Memo issue | `POST /api/parcels/:id/memo` | Memo button |
-| Memo return | `POST /api/parcels/:id/memo-return` | — |
-| Count/weight adjust | `POST /api/parcels/:id/adjust` | Adjust button |
+## Operations Covered
 
-### UAT Test Scenarios
+| Operation | Endpoint | UI |
+|-----------|----------|----|
+| Receive | `POST /api/parcels` | Receive |
+| Split | `POST /api/parcels/:id/split` | Split |
+| Merge | `POST /api/parcels/merge` | Merge |
+| Transfer | `POST /api/parcels/:id/transfer` | Transfer |
+| Manufacturing issue / return | `…/issue`, `…/return` | Issue / Return |
+| Memo issue / return | `…/memo`, `…/memo-return` | Memo / Memo Return |
+| Reserve / unreserve | `…/reserve`, `…/unreserve` | Reserve |
+| Sale | `…/sale` | Sale |
+| Regrade / resort | `…/regrade` | Regrade |
+| Count adjust (maker-checker) | `…/adjust` | Adjust |
+| Quarantine / release | `…/quarantine`, `…/release-quarantine` | Quarantine / Release QC |
+| Ownership transfer | `…/ownership` | API |
+| Certificate attach | `…/certificates` | API |
+| Disposition audit | `GET …/disposition` | Disposition |
+| Genealogy | `GET …/genealogy` | Detail |
+| UAT reset | `POST /api/uat/reset` | Reset Data |
 
-15 guided UAT scenarios are available:
-- **In the browser**: navigate to the **UAT Scenarios** tab.
-- **As a document**: [`uat/test-scenarios.md`](uat/test-scenarios.md)
+---
+
+## UAT Scenarios
+
+**18 guided scenarios** in the **UAT Scenarios** tab (Pass / Fail / Blocked with browser persistence).
+
+Printable checklist: [`uat/test-scenarios.md`](uat/test-scenarios.md)
+
+Automated coverage: `npm run test:smoke`
 
 ---
 
 ## Architecture
 
 ```
-server.js               Express REST API (all business logic)
-src/
-  database.js           SQLite schema initialisation (better-sqlite3)
-  seed.js               Realistic sample data
-public/
-  index.html            Single-page Bootstrap 5 UI
-  js/app.js             Vanilla JS frontend
-  css/custom.css        Styling
-database/
-  parcel_uat.db         Auto-created SQLite database
-uat/
-  test-scenarios.md     Printable UAT sign-off document
+server.js               Express REST API + business rules
+src/database.js         sql.js SQLite schema
+src/seed.js             Realistic sample data
+public/                 Bootstrap UAT SPA
+uat/test-scenarios.md   Sign-off document
+uat/smoke-tests.js      API smoke suite
+database/parcel_uat.db  Auto-created (gitignored)
 ```
 
-### Core Database Entities
+### Core entities
 
 | Table | Purpose |
 |-------|---------|
-| `parcels` | Current identity, balance, location, valuation |
-| `parcel_transactions` | **Immutable** business event ledger |
+| `parcels` | Current identity, dual-unit balances, ownership, custody, valuation |
+| `parcel_transactions` | **Immutable** append-only ledger |
 | `parcel_relationships` | Split / merge / regrade genealogy |
-| `parcel_certificates` | Lab, screening, KP compliance |
-| `parcel_reservations` | Active allocations to orders / jobs |
-
-### API Reference
-
-```
-GET  /api/dashboard                   Portfolio stats
-GET  /api/parcels                     List (filter: ?q=, &material=, &lifecycle_stage=)
-GET  /api/parcels/:id                 Detail + certs + children + parents
-POST /api/parcels                     Receive new parcel
-POST /api/parcels/:id/split           Split into children
-POST /api/parcels/merge               Merge source parcels
-POST /api/parcels/:id/transfer        Relocate / change custodian
-POST /api/parcels/:id/issue           Issue to manufacturing
-POST /api/parcels/:id/return          Return from manufacturing
-POST /api/parcels/:id/memo            Issue on customer/vendor memo
-POST /api/parcels/:id/memo-return     Return from memo
-POST /api/parcels/:id/adjust          Physical count / weight correction
-GET  /api/parcels/:id/transactions    Full transaction ledger
-GET  /api/parcels/:id/genealogy       Family tree (split/merge ancestry)
-```
+| `parcel_certificates` | Lab, screening, KP / compliance |
+| `parcel_reservations` | Order / job allocations |
 
 ---
 
-## Key Design Principles Implemented
+## Non-negotiable controls implemented
 
-1. **Dual-unit management** — pieces and weight are always independent fields.
-2. **Immutable ledger** — every operation appends a transaction; none can be deleted.
-3. **Genealogy graph** — full split/merge ancestry from root to leaf.
-4. **Natural / lab-grown separation** — merge is blocked across origin types.
-5. **Ownership ≠ custody** — `owner`, `custodian`, and `legal_entity` are separate fields.
-6. **Multiple balance dimensions** — current, reserved, memo, WIP, damaged.
-7. **Compliance traceability** — KP certificate, screening status, responsible source.
+1. Dual quantity management — pieces and weight are independent  
+2. Complete genealogy across splits, merges, and regrades  
+3. Separate ownership, custody, and location  
+4. Immutable transaction ledger  
+5. Natural / lab-grown / treatment merge separation  
+6. Multiple pricing units (incl. per-piece zero-weight pearls)  
+7. Memo and consignment lifecycle  
+8. Manufacturing issue, return, breakage, and loss  
+9. Physical count with maker-checker approval  
+10. Certificate and disposition (carat-trace) reports  
+11. Quarantine blocks production issue until release  
+12. Configurable regrade variance tolerance  
+13. Reservation dimension on available balance  
+14. Sale / COGS with parcel closure at zero  
+15. UAT reset + interactive sign-off checklist  
 
 ---
 
-## Re-seed Fresh Data
+## Design principle
 
-```bash
-npm run seed
-```
-
-This resets the database to the original 8 sample parcels.
+> **A parcel is an inventory identity; the parcel ledger is the accounting truth.**
