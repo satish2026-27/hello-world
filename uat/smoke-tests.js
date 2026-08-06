@@ -64,6 +64,8 @@ async function run() {
   {
     const r = await req('POST', '/api/parcels', {
       parcel_number: 'DP-SMOKE-001',
+      vendor: 'RUCHI DIAMONDS',
+      invoice_number: 'INV-SMOKE-001',
       material: 'natural_diamond', material_origin: 'natural',
       shape: 'Round Brilliant', size_min_mm: 2.0, size_max_mm: 2.2,
       color: 'G', color_range_max: 'H', clarity: 'SI1', clarity_range_max: 'SI2',
@@ -75,8 +77,29 @@ async function run() {
     assert('Receive creates parcel', r.status === 201, JSON.stringify(r.data));
     const d = await req('GET', `/api/parcels/${r.data.id}`);
     assert('Receipt landed cost = 2100', Math.abs(d.data.landed_cost - 2100) < 0.01, `got ${d.data.landed_cost}`);
+    assert('Vendor stored', d.data.vendor === 'RUCHI DIAMONDS');
+    assert('Invoice stored', d.data.invoice_number === 'INV-SMOKE-001');
     const tx = await req('GET', `/api/parcels/${r.data.id}/transactions`);
     assert('Receipt ledger entry exists', tx.data.some(t => t.transaction_type === 'receipt'));
+  }
+
+  // Invoice/memo rule
+  {
+    const r = await req('POST', '/api/parcels', {
+      parcel_number: 'DP-SMOKE-NODOC',
+      vendor: 'KASPHUL LLC',
+      material: 'sapphire', material_origin: 'natural',
+      original_pieces: 5, original_weight_ct: 2.0, purchase_rate: 100,
+    });
+    assert('Receive without invoice/memo rejected', r.status === 400 && /invoice|memo/i.test(r.data.error), JSON.stringify(r.data));
+  }
+
+  // Materials catalog size
+  {
+    const r = await req('GET', '/api/meta/materials');
+    assert('Materials catalog is searchable size', r.status === 200 && r.data.length >= 150, `got ${r.data?.length}`);
+    const v = await req('GET', '/api/meta/vendors');
+    assert('Vendors list has 7 entries', v.status === 200 && v.data.length === 7, `got ${v.data?.length}`);
   }
 
   // UAT-02 Split
@@ -140,6 +163,7 @@ async function run() {
     await reset();
     const recv = await req('POST', '/api/parcels', {
       parcel_number: 'DUAL-UNIT-001', material: 'natural_diamond', material_origin: 'natural',
+      vendor: 'PALA INTERNATIONAL', memo_number: 'MEMO-DUAL-1',
       original_pieces: 10, original_weight_ct: 3.0, purchase_rate: 500, pricing_unit: 'per_carat',
       screening_status: 'screened',
     });

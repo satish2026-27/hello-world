@@ -69,7 +69,30 @@ body { background: #f4f6f9; font-size: 0.875rem; }
 .gene-node { border:1px solid #dee2e6; border-radius:.4rem; padding:.4rem .8rem; display:inline-block; background:#fff; font-size:.8rem; }
 .gene-child { margin-left: 2rem; border-left: 2px dashed #adb5bd; padding-left: 1rem; }
 
-/* ── Responsive tweaks ─────────────────────────────────────────────────── */
+.material-typeahead { z-index: 5; }
+.material-dropdown {
+  z-index: 1050;
+  max-height: 240px;
+  overflow-y: auto;
+  top: 100%;
+  left: 0;
+  margin-top: 2px;
+  border: 1px solid #ced4da;
+  border-radius: .375rem;
+  background: #fff;
+}
+.material-dropdown .list-group-item {
+  cursor: pointer;
+  border-left: 0;
+  border-right: 0;
+  font-size: .85rem;
+  padding: .4rem .75rem;
+}
+.material-dropdown .list-group-item:hover,
+.material-dropdown .list-group-item.active {
+  background: #eef3f8;
+  color: var(--gem-navy);
+}
 @media (max-width:768px) {
   .navbar .d-flex { flex-wrap: wrap; gap: .3rem !important; }
 }
