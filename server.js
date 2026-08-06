@@ -126,15 +126,54 @@ app.get('/api/parcels/:id', (req, res) => {
 
 // Create / Receive a new parcel
 app.post('/api/parcels', (req, res) => {
+  try {
   const db = getDb();
   const d  = req.body;
   const id = uuidv4();
   const num = d.parcel_number || `PCL-${Date.now()}`;
-  const cost = (d.purchase_rate || 0) * (d.pricing_unit === 'per_carat' ? (d.original_weight_ct || 0) : (d.original_pieces || 0));
+
+  const invoice = (d.invoice_number || '').trim();
+  const memoNum = (d.memo_number || '').trim();
+  if (!invoice && !memoNum) {
+    return res.status(400).json({ error: 'Either Invoice Number or Memo # is required' });
+  }
+  const alnumDoc = /^[A-Za-z0-9][A-Za-z0-9\-_/]*$/;
+  if (invoice && !alnumDoc.test(invoice)) {
+    return res.status(400).json({ error: 'Invoice Number must be alphanumeric (letters, numbers, - _ / allowed)' });
+  }
+  if (memoNum && !alnumDoc.test(memoNum)) {
+    return res.status(400).json({ error: 'Memo # must be alphanumeric (letters, numbers, - _ / allowed)' });
+  }
+  if (d.original_weight_ct === undefined || d.original_weight_ct === null || d.original_weight_ct === '') {
+    return res.status(400).json({ error: 'Total carat weight is required' });
+  }
+  if (d.purchase_rate === undefined || d.purchase_rate === null || d.purchase_rate === '') {
+    return res.status(400).json({ error: 'Purchase rate is required' });
+  }
+  if (!d.material) return res.status(400).json({ error: 'Material is required' });
+  if (!d.vendor) return res.status(400).json({ error: 'Vendor is required' });
+
+  const weight = +d.original_weight_ct;
+  const rate = +d.purchase_rate;
+  const pieces = +(d.original_pieces || 0);
+  const unit = d.pricing_unit || 'per_carat';
+  let cost;
+  if (d.landed_cost != null && d.landed_cost !== '') {
+    cost = +d.landed_cost;
+  } else if (unit === 'per_carat') {
+    cost = +(rate * weight).toFixed(2);
+  } else if (unit === 'per_piece') {
+    cost = +(rate * pieces).toFixed(2);
+  } else if (unit === 'per_parcel') {
+    cost = +rate.toFixed(2);
+  } else {
+    cost = +(rate * weight).toFixed(2);
+  }
 
   db.prepare(`
     INSERT INTO parcels (
-      id, parcel_number, vendor_parcel_number, po_number, receipt_reference,
+      id, parcel_number, vendor_parcel_number, vendor, invoice_number, memo_number,
+      po_number, receipt_reference,
       status, lifecycle_stage, material, material_origin, condition, shape,
       size_min_mm, size_max_mm, color, color_range_max, clarity, clarity_range_max,
       treatment, fluorescence, origin_country,
@@ -143,7 +182,8 @@ app.post('/api/parcels', (req, res) => {
       site, vault, bin_location, custodian, owner, legal_entity,
       screening_status, created_by, notes
     ) VALUES (
-      @id, @parcel_number, @vendor_parcel_number, @po_number, @receipt_reference,
+      @id, @parcel_number, @vendor_parcel_number, @vendor, @invoice_number, @memo_number,
+      @po_number, @receipt_reference,
       'active', 'available', @material, @material_origin, @condition, @shape,
       @size_min_mm, @size_max_mm, @color, @color_range_max, @clarity, @clarity_range_max,
       @treatment, @fluorescence, @origin_country,
@@ -155,6 +195,9 @@ app.post('/api/parcels', (req, res) => {
   `).run({
     id, parcel_number: num,
     vendor_parcel_number: d.vendor_parcel_number || null,
+    vendor: d.vendor || null,
+    invoice_number: invoice || null,
+    memo_number: memoNum || null,
     po_number: d.po_number || null,
     receipt_reference: d.receipt_reference || null,
     material: d.material, material_origin: d.material_origin || 'natural',
@@ -164,11 +207,11 @@ app.post('/api/parcels', (req, res) => {
     clarity: d.clarity || null, clarity_range_max: d.clarity_range_max || null,
     treatment: d.treatment || 'none', fluorescence: d.fluorescence || 'none',
     origin_country: d.origin_country || null,
-    original_pieces: d.original_pieces || 0,
-    original_weight_ct: d.original_weight_ct || 0,
-    purchase_rate: d.purchase_rate || 0,
-    pricing_unit: d.pricing_unit || 'per_carat',
-    landed_cost: d.landed_cost || cost,
+    original_pieces: pieces,
+    original_weight_ct: weight,
+    purchase_rate: rate,
+    pricing_unit: unit,
+    landed_cost: cost,
     currency: d.currency || 'USD',
     site: d.site || null, vault: d.vault || null,
     bin_location: d.bin_location || null,
@@ -192,15 +235,19 @@ app.post('/api/parcels', (req, res) => {
        @date, @date, @by, 'PURCHASE', @notes)
   `).run({
     id: uuidv4(), parcel_id: id,
-    ref: d.receipt_reference || null, doc: d.po_number || null,
-    pieces: d.original_pieces || 0, weight: d.original_weight_ct || 0,
-    cost: d.landed_cost || cost,
+    ref: invoice || memoNum || d.receipt_reference || null,
+    doc: d.po_number || null,
+    pieces, weight, cost,
     loc: [d.vault, d.bin_location].filter(Boolean).join(' / ') || null,
     cust: d.custodian || null, date: today(),
-    by: d.created_by || 'uat_user', notes: d.notes || null,
+    by: d.created_by || 'uat_user',
+    notes: [d.notes, d.vendor ? `Vendor: ${d.vendor}` : null, invoice ? `Invoice: ${invoice}` : null, memoNum ? `Memo: ${memoNum}` : null].filter(Boolean).join(' | ') || null,
   });
 
-  res.status(201).json({ id, parcel_number: num });
+  res.status(201).json({ id, parcel_number: num, landed_cost: cost });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1324,8 +1371,11 @@ app.get('/api/parcels/:id/genealogy', (req, res) => {
   res.json(buildTree(rootId));
 });
 
+const { MATERIALS, VENDORS } = require('./src/materials');
+
 // Lookup fields (for dropdowns)
-app.get('/api/meta/materials', (_req, res) => res.json(['natural_diamond','lab_diamond','ruby','sapphire','emerald','alexandrite','pearl','opal','spinel','tanzanite','tourmaline','bead','finding','scrap','unknown']));
+app.get('/api/meta/materials', (_req, res) => res.json(MATERIALS));
+app.get('/api/meta/vendors', (_req, res) => res.json(VENDORS));
 app.get('/api/meta/lifecycle',  (_req, res) => res.json(['available','in_production','on_memo','quarantined','reserved','closed']));
 
 // ─────────────────────────────────────────────────────────────────────────────

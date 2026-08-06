@@ -112,6 +112,9 @@ function initSchema() {
       parent_parcel_id    TEXT,
       root_parcel_id      TEXT,
       vendor_parcel_number TEXT,
+      vendor              TEXT,
+      invoice_number      TEXT,
+      memo_number         TEXT,
       po_number           TEXT,
       receipt_reference   TEXT,
 
@@ -257,6 +260,19 @@ function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_rel_parent       ON parcel_relationships(parent_parcel_id);
     CREATE INDEX IF NOT EXISTS idx_rel_child        ON parcel_relationships(child_parcel_id);
   `);
+
+  // Migrate existing DBs created before vendor / invoice / memo columns
+  const cols = _db.exec('PRAGMA table_info(parcels)');
+  const names = new Set();
+  if (cols[0]) {
+    const nameIdx = cols[0].columns.indexOf('name');
+    for (const row of cols[0].values) names.add(row[nameIdx]);
+  }
+  for (const col of ['vendor', 'invoice_number', 'memo_number']) {
+    if (!names.has(col)) {
+      _db.run(`ALTER TABLE parcels ADD COLUMN ${col} TEXT`);
+    }
+  }
 }
 
 async function reloadDb() {

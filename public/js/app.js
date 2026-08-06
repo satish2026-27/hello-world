@@ -10,7 +10,11 @@ function showView(name, parcelId) {
   if (name === 'parcels')   loadParcels();
   if (name === 'detail' && parcelId) loadDetail(parcelId);
   if (name === 'uat')       renderUAT();
-  if (name === 'receive')   populateMaterialDropdowns();
+  if (name === 'receive') {
+    populateMaterialDropdowns();
+    populateVendorDropdown();
+    bindReceiveCostListeners();
+  }
   if (name === 'disposition' && parcelId) loadDisposition(parcelId);
 }
 
@@ -131,16 +135,140 @@ async function loadParcels() {
 
 async function populateMaterialDropdowns() {
   const materials = await api('/api/meta/materials');
-  ['materialSelect', 'filterMaterial'].forEach(id => {
-    const sel = document.getElementById(id);
-    if (!sel) return;
+  allMaterials = materials;
+  // Keep list-filter select populated for parcel inventory filter
+  const sel = document.getElementById('filterMaterial');
+  if (sel) {
     materials.forEach(m => {
       if (!sel.querySelector(`option[value="${m}"]`)) {
         const o = document.createElement('option');
-        o.value = m; o.text = m.replace(/_/g,' ');
+        o.value = m; o.text = labelMaterial(m);
         sel.appendChild(o);
       }
     });
+  }
+  initMaterialTypeahead();
+}
+
+async function populateVendorDropdown() {
+  const vendors = await api('/api/meta/vendors');
+  const sel = document.getElementById('vendorSelect');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">— select vendor —</option>';
+  vendors.forEach(v => {
+    const o = document.createElement('option');
+    o.value = v; o.text = v;
+    sel.appendChild(o);
+  });
+  if (current) sel.value = current;
+}
+
+function labelMaterial(m) {
+  return String(m || '').replace(/_/g, ' ');
+}
+
+/* ── Material typeahead ─────────────────────────────────────────────────── */
+let allMaterials = [];
+let materialHighlight = -1;
+
+function initMaterialTypeahead() {
+  const input = document.getElementById('materialSearch');
+  const hidden = document.getElementById('materialValue');
+  const drop = document.getElementById('materialDropdown');
+  if (!input || !drop || input.dataset.bound) return;
+  input.dataset.bound = '1';
+
+  input.addEventListener('input', () => {
+    hidden.value = '';
+    materialHighlight = -1;
+    renderMaterialSuggestions(input.value);
+    recalcReceiveTotal();
+  });
+  input.addEventListener('focus', () => renderMaterialSuggestions(input.value));
+  input.addEventListener('keydown', (e) => {
+    const items = drop.querySelectorAll('[data-value]');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      materialHighlight = Math.min(materialHighlight + 1, items.length - 1);
+      syncMaterialHighlight(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      materialHighlight = Math.max(materialHighlight - 1, 0);
+      syncMaterialHighlight(items);
+    } else if (e.key === 'Enter') {
+      if (materialHighlight >= 0 && items[materialHighlight]) {
+        e.preventDefault();
+        selectMaterial(items[materialHighlight].dataset.value);
+      }
+    } else if (e.key === 'Escape') {
+      drop.classList.add('d-none');
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.material-typeahead')) drop.classList.add('d-none');
+  });
+}
+
+function syncMaterialHighlight(items) {
+  items.forEach((el, i) => el.classList.toggle('active', i === materialHighlight));
+  if (items[materialHighlight]) items[materialHighlight].scrollIntoView({ block: 'nearest' });
+}
+
+function renderMaterialSuggestions(q) {
+  const drop = document.getElementById('materialDropdown');
+  if (!drop) return;
+  const query = (q || '').trim().toLowerCase().replace(/\s+/g, '_');
+  const matches = allMaterials
+    .filter(m => !query || m.includes(query) || labelMaterial(m).toLowerCase().includes(query.replace(/_/g, ' ')))
+    .slice(0, 40);
+  if (!matches.length) {
+    drop.innerHTML = `<div class="list-group-item text-muted">No matching gemstones</div>`;
+    drop.classList.remove('d-none');
+    return;
+  }
+  drop.innerHTML = matches.map(m =>
+    `<button type="button" class="list-group-item list-group-item-action" data-value="${m}">${labelMaterial(m)}</button>`
+  ).join('');
+  drop.querySelectorAll('[data-value]').forEach(btn => {
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      selectMaterial(btn.dataset.value);
+    });
+  });
+  drop.classList.remove('d-none');
+}
+
+function selectMaterial(value) {
+  document.getElementById('materialValue').value = value;
+  document.getElementById('materialSearch').value = labelMaterial(value);
+  document.getElementById('materialDropdown').classList.add('d-none');
+  materialHighlight = -1;
+}
+
+function recalcReceiveTotal() {
+  const rate = +document.getElementById('recvRate')?.value || 0;
+  const weight = +document.getElementById('recvWeight')?.value || 0;
+  const pieces = +document.getElementById('recvPieces')?.value || 0;
+  const unit = document.getElementById('recvPricingUnit')?.value || 'per_carat';
+  const totalEl = document.getElementById('recvTotalCost');
+  if (!totalEl) return;
+  let total = 0;
+  if (unit === 'per_carat') total = rate * weight;
+  else if (unit === 'per_piece') total = rate * pieces;
+  else if (unit === 'per_parcel') total = rate;
+  else total = rate * weight;
+  totalEl.value = total ? total.toFixed(2) : '';
+}
+
+function bindReceiveCostListeners() {
+  ['recvRate', 'recvWeight', 'recvPieces', 'recvPricingUnit'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && !el.dataset.costBound) {
+      el.dataset.costBound = '1';
+      el.addEventListener('input', recalcReceiveTotal);
+      el.addEventListener('change', recalcReceiveTotal);
+    }
   });
 }
 
@@ -191,6 +319,10 @@ async function loadDetail(id) {
               <div class="col-md-3"><small class="text-muted">Origin</small><br>${p.origin_country || '—'}</div>
               <div class="col-md-3"><small class="text-muted">Screening</small><br>${p.screening_status}</div>
               <div class="col-md-3"><small class="text-muted">KP Certificate</small><br>${p.kimberley_cert || '—'}</div>
+              <div class="col-md-3"><small class="text-muted">Vendor</small><br>${p.vendor || '—'}</div>
+              <div class="col-md-3"><small class="text-muted">Invoice #</small><br>${p.invoice_number || '—'}</div>
+              <div class="col-md-3"><small class="text-muted">Memo #</small><br>${p.memo_number || '—'}</div>
+              <div class="col-md-3"><small class="text-muted">Vendor Parcel #</small><br>${p.vendor_parcel_number || '—'}</div>
             </div>
           </div>
         </div>
@@ -355,12 +487,50 @@ async function submitReceive(e) {
   e.preventDefault();
   const form = e.target;
   const data = Object.fromEntries(new FormData(form).entries());
-  // Convert numeric fields
-  ['size_min_mm','size_max_mm','original_pieces','original_weight_ct','purchase_rate'].forEach(k => { if (data[k]) data[k] = +data[k]; });
+  const invoice = (data.invoice_number || '').trim();
+  const memo = (data.memo_number || '').trim();
+  const errEl = document.getElementById('docReqError');
+
+  if (!invoice && !memo) {
+    errEl?.classList.remove('d-none');
+    toast('Either Invoice Number or Memo # is required', 'danger');
+    return;
+  }
+  errEl?.classList.add('d-none');
+
+  if (!data.material) {
+    toast('Select a material from the search list', 'warning');
+    document.getElementById('materialSearch')?.focus();
+    return;
+  }
+  if (!data.vendor) {
+    toast('Vendor is required', 'warning');
+    return;
+  }
+  if (data.original_weight_ct === '' || data.original_weight_ct == null) {
+    toast('Total carat weight is required', 'warning');
+    return;
+  }
+  if (data.purchase_rate === '' || data.purchase_rate == null) {
+    toast('Purchase rate is required', 'warning');
+    return;
+  }
+  if (data.landed_cost === '' || data.landed_cost == null) {
+    toast('Total cost of parcel is required', 'warning');
+    return;
+  }
+
+  ['size_min_mm','size_max_mm','original_pieces','original_weight_ct','purchase_rate','landed_cost'].forEach(k => {
+    if (data[k] !== undefined && data[k] !== '') data[k] = +data[k];
+  });
+
   try {
     const r = await api('/api/parcels', 'POST', data);
-    toast(`Parcel <strong>${r.parcel_number}</strong> received successfully`, 'success');
+    toast(`Parcel <strong>${r.parcel_number}</strong> received · total cost ${fmtUSD(r.landed_cost)}`, 'success');
     form.reset();
+    document.getElementById('materialValue').value = '';
+    const owner = form.querySelector('[name="owner"]');
+    if (owner) owner.value = 'Company';
     showView('detail', r.id);
   } catch(err) { toast(err.message, 'danger'); }
 }
